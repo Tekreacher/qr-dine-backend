@@ -29,7 +29,7 @@ router.post('/register', [
       });
     }
 
-    const { name, email, password, phone, address } = req.body;
+    const { name, email, password, phone, address, ownerName, ownerPhone } = req.body;
 
     // Check if restaurant exists
     const existingRestaurant = await Restaurant.findOne({ email });
@@ -45,6 +45,8 @@ router.post('/register', [
       name,
       email,
       password,
+      ownerName: ownerName || name,
+      ownerPhone: ownerPhone || phone || '',
       phone,
       address
     });
@@ -96,6 +98,35 @@ router.post('/login', [
       return res.status(401).json({
         success: false,
         message: 'Invalid credentials'
+      });
+    }
+
+    // Check approval status
+    if (!restaurant.isApproved) {
+      return res.status(403).json({
+        success: false,
+        message: 'Your account is pending approval. Please contact the admin.',
+        status: 'pending'
+      });
+    }
+
+    if (!restaurant.isActive) {
+      return res.status(403).json({
+        success: false,
+        message: 'Your account has been disabled. Please contact the admin.',
+        status: 'disabled'
+      });
+    }
+
+    // Check subscription expiry
+    if (restaurant.subscriptionExpiry && restaurant.subscriptionExpiry < new Date()) {
+      restaurant.subscriptionStatus = 'expired';
+      restaurant.isActive = false;
+      await restaurant.save();
+      return res.status(403).json({
+        success: false,
+        message: 'Your subscription has expired. Please contact the admin to renew.',
+        status: 'expired'
       });
     }
 

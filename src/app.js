@@ -37,6 +37,7 @@ app.use('/api/orders', require('./routes/order'));
 app.use('/api/admin/orders', require('./routes/orderAdmin'));
 app.use('/api/order-status', require('./routes/orderStatus'));
 app.use('/api/webhook', require('./routes/webhook'));
+app.use('/api/admin', require('./routes/admin'));
 
 /* ===============================
    HEALTH CHECK
