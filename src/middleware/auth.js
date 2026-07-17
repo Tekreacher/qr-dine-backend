@@ -17,15 +17,31 @@ exports.protect = async (req, res, next) => {
 
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    req.restaurant = await Restaurant.findById(decoded.id);
-    
-    if (!req.restaurant) {
-      return res.status(401).json({
+    const restaurant = await Restaurant.findById(decoded.id);
+
+    if (!restaurant) {
+      return res.status(401).json({ success: false, message: 'Restaurant not found' });
+    }
+
+    // Block if not approved or disabled
+    if (!restaurant.isApproved || !restaurant.isActive) {
+      return res.status(403).json({
         success: false,
-        message: 'Restaurant not found'
+        message: 'Your account has been disabled. Please contact admin.',
+        status: 'disabled'
       });
     }
 
+    // Block if subscription expired
+    if (restaurant.subscriptionExpiry && restaurant.subscriptionExpiry < new Date()) {
+      return res.status(403).json({
+        success: false,
+        message: 'Your subscription has expired. Please contact admin to renew.',
+        status: 'expired'
+      });
+    }
+
+    req.restaurant = restaurant;
     next();
   } catch (error) {
     return res.status(401).json({
