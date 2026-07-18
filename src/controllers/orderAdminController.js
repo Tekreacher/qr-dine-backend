@@ -1,4 +1,5 @@
 const Order = require('../models/Order');
+const Customer = require('../models/Customer');
 const ExcelJS = require('exceljs');
 
 // @desc    Get all orders for restaurant with date filter
@@ -68,6 +69,36 @@ exports.updateOrderStatus = async (req, res) => {
       order.readyAt = new Date();
     }
     await order.save();
+
+    // When admin marks completed, move order to customer's history server-side.
+    // This is the authoritative trigger — don't rely on the customer's browser being open.
+    if (status === 'completed') {
+      try {
+        // Find customer by currentOrderId first, then fall back to phone + restaurant
+        let customer = await Customer.findOne({ currentOrderId: order._id });
+        if (!customer && order.customerPhone) {
+          customer = await Customer.findOne({
+            phone: order.customerPhone,
+            restaurantId: order.restaurantId
+          });
+        }
+
+        if (customer) {
+          const alreadyInHistory = customer.orderHistory.some(
+            h => h.orderId && h.orderId.toString() === order._id.toString()
+          );
+          if (!alreadyInHistory) {
+            customer.orderHistory.push({ orderId: order._id, completedAt: new Date() });
+          }
+          customer.currentOrderId = null;
+          customer.isExistingCustomer = true;
+          await customer.save();
+        }
+      } catch (err) {
+        // Don't fail the status update if history migration fails
+        console.error('Failed to move order to customer history:', err);
+      }
+    }
 
     res.json({ success: true, order });
   } catch (error) {

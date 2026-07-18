@@ -177,15 +177,60 @@ router.get('/:customerId/order-history', async (req, res) => {
       return res.status(404).json({ success: false, message: 'Customer not found' });
     }
 
-    const cleanHistory = customer.orderHistory
+    // Build a set of order IDs already in history
+    const historyIds = new Set(
+      customer.orderHistory
+        .filter(h => h.orderId)
+        .map(h => h.orderId._id ? h.orderId._id.toString() : h.orderId.toString())
+    );
+
+    // Fallback: also query completed orders directly by phone + restaurant.
+    // This catches any orders that were completed before the server-side fix,
+    // or where the client-side complete-order call never fired.
+    let extraOrders = [];
+    if (customer.phone && customer.restaurantId) {
+      const directCompleted = await Order.find({
+        customerPhone: customer.phone,
+        restaurantId: customer.restaurantId,
+        orderStatus: 'completed'
+      }).select('items totalAmount orderStatus paymentStatus tableNumber createdAt customerName updatedAt');
+
+      for (const o of directCompleted) {
+        if (!historyIds.has(o._id.toString())) {
+          extraOrders.push({ orderId: o, completedAt: o.updatedAt || o.createdAt });
+          // Also persist it into history so future calls don't need the fallback
+          customer.orderHistory.push({ orderId: o._id, completedAt: o.updatedAt || o.createdAt });
+        }
+      }
+      if (extraOrders.length > 0) {
+        customer.isExistingCustomer = true;
+        await customer.save();
+      }
+    }
+
+    const fromHistory = customer.orderHistory
       .filter(entry => entry.orderId !== null)
       .map(entry => ({
         orderId: entry.orderId,
         completedAt: entry.completedAt
-      }))
-      .reverse();
+      }));
 
-    res.json({ success: true, orderHistory: cleanHistory });
+    // Merge history entries with any extra orders found via direct query,
+    // then sort newest first
+    const allOrders = [...fromHistory, ...extraOrders];
+    const seen = new Set();
+    const merged = allOrders
+      .filter(entry => {
+        const id = entry.orderId?._id
+          ? entry.orderId._id.toString()
+          : entry.orderId?.toString();
+        if (!id || seen.has(id)) return false;
+        seen.add(id);
+        return true;
+      })
+      .sort((a, b) => new Date(b.completedAt) - new Date(a.completedAt));
+
+    res.json({ success: true, orderHistory: merged });
   } catch (error) {
     console.error('Error fetching order history:', error);
     res.status(500).json({ success: false, message: 'Error fetching order history' });
