@@ -101,11 +101,26 @@ router.get('/:uniqueCode', async (req, res) => {
       });
     }
 
+    // Block ordering if restaurant is disabled, not approved, or subscription expired
+    if (!restaurant.isApproved || !restaurant.isActive) {
+      return res.status(403).json({
+        success: false,
+        message: 'This restaurant is currently not accepting orders. Please contact the restaurant.'
+      });
+    }
+
+    if (restaurant.subscriptionExpiry && restaurant.subscriptionExpiry < new Date()) {
+      return res.status(403).json({
+        success: false,
+        message: 'This restaurant is currently not accepting orders. Please contact the restaurant.'
+      });
+    }
+
     res.json({
       success: true,
       restaurant: {
-        _id: restaurant._id,          // ✅ ADD THIS LINE
-        id: restaurant._id.toString(), // ✅ ADD THIS LINE for compatibility
+        _id: restaurant._id,
+        id: restaurant._id.toString(),
         name: restaurant.name,
         address: restaurant.address,
         menuItems: restaurant.menuItems.filter(item => item.available),

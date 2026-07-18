@@ -421,13 +421,35 @@ router.post('/generate-qr', protect, async (req, res) => {
   try {
     const restaurant = await Restaurant.findById(req.restaurant._id);
 
-    // Always generate a brand-new unique code on every regenerate
+    // Generate a new unique code
     const newUniqueCode = Math.random().toString(36).substring(2, 10).toUpperCase();
-    restaurant.uniqueCode = newUniqueCode;
-
     const orderUrl = `${process.env.FRONTEND_URL}/menu/${newUniqueCode}`;
     const qrCodeDataUrl = await generateQR(orderUrl);
-    
+
+    // Save all QR codes so OLD printed QRs keep working forever
+    if (!restaurant.allQrCodes) restaurant.allQrCodes = [];
+
+    // Migrate: add current code to array if not already there
+    if (restaurant.uniqueCode) {
+      const exists = restaurant.allQrCodes.some(q => q.uniqueCode === restaurant.uniqueCode);
+      if (!exists) {
+        restaurant.allQrCodes.push({
+          uniqueCode: restaurant.uniqueCode,
+          qrCode: restaurant.qrCode || '',
+          createdAt: restaurant.createdAt || new Date()
+        });
+      }
+    }
+
+    // Add the new code to the array too
+    restaurant.allQrCodes.push({
+      uniqueCode: newUniqueCode,
+      qrCode: qrCodeDataUrl,
+      createdAt: new Date()
+    });
+
+    // Update current active code
+    restaurant.uniqueCode = newUniqueCode;
     restaurant.qrCode = qrCodeDataUrl;
     await restaurant.save();
 
