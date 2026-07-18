@@ -36,6 +36,31 @@ router.post('/setup', async (req, res) => {
 });
 
 // @route POST /api/admin/login
+// @route POST /api/admin/reset-password
+// @desc  Reset admin password using a secret key (emergency use)
+router.post('/reset-password', async (req, res) => {
+  try {
+    const { secretKey, email, newPassword } = req.body;
+
+    // This secret key must match — change it to something only you know
+    if (secretKey !== 'QRDINE_RESET_2026_PRATHAMESH') {
+      return res.status(403).json({ success: false, message: 'Invalid secret key' });
+    }
+
+    const admin = await Admin.findOne({ email });
+    if (!admin) {
+      return res.status(404).json({ success: false, message: 'Admin not found with this email' });
+    }
+
+    admin.password = newPassword;
+    await admin.save();
+
+    res.json({ success: true, message: 'Password reset successfully. You can now login.' });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 router.post('/login', async (req, res) => {
   try {
     const { email, password } = req.body;
