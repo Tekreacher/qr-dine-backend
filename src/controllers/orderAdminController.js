@@ -1,299 +1,244 @@
 const Order = require('../models/Order');
 const ExcelJS = require('exceljs');
 
-// @desc    Get all orders for restaurant
+// @desc    Get all orders for restaurant with date filter
 // @route   GET /api/admin/orders
-// @access  Private (Restaurant)
-
-
-
 exports.getRestaurantOrders = async (req, res) => {
   try {
-    const { status, startDate, endDate } = req.query;
-    
+    const { status, startDate, endDate, limit = 200 } = req.query;
     const query = { restaurantId: req.restaurant._id };
-    
-    if (status && status !== 'all') {
-      query.orderStatus = status;
-    }
-    
+
+    if (status && status !== 'all') query.orderStatus = status;
+
     if (startDate || endDate) {
       query.createdAt = {};
       if (startDate) query.createdAt.$gte = new Date(startDate);
       if (endDate) query.createdAt.$lte = new Date(endDate);
     }
 
-    const orders = await Order.find(query).sort({ createdAt: -1 });
+    const orders = await Order.find(query).sort({ createdAt: -1 }).limit(Number(limit));
 
-    console.log(`📋 Found ${orders.length} orders for restaurant ${req.restaurant.name}`);
-
-    res.json({
-      success: true,
-      count: orders.length,
-      orders
-    });
+    res.json({ success: true, count: orders.length, orders });
   } catch (error) {
-    console.error('❌ Error fetching orders:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error fetching orders'
-    });
+    res.status(500).json({ success: false, message: 'Error fetching orders' });
   }
 };
 
 // @desc    Mark order as ready
 // @route   PUT /api/admin/orders/:orderId/ready
-// @access  Private (Restaurant)
-
 const { sendOrderReadySMS } = require('../services/notificationService');
 
 exports.markOrderReady = async (req, res) => {
   try {
-    const order = await Order.findOne({
-      _id: req.params.orderId,
-      restaurantId: req.restaurant._id
-    });
-
-    if (!order) {
-      return res.status(404).json({
-        success: false,
-        message: 'Order not found'
-      });
-    }
+    const order = await Order.findOne({ _id: req.params.orderId, restaurantId: req.restaurant._id });
+    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
 
     order.isReady = true;
     order.orderStatus = 'ready';
     order.readyAt = new Date();
-    
     await order.save();
 
-    console.log(`✅ Order ${order._id} marked as ready`);
-
-    // Send SMS notification
     if (order.customerPhone) {
       const orderNumber = order._id.toString().slice(-6).toUpperCase();
-      await sendOrderReadySMS(
-        order.customerPhone,
-        req.restaurant.name,
-        orderNumber
-      );
+      await sendOrderReadySMS(order.customerPhone, req.restaurant.name, orderNumber);
     }
 
-    res.json({
-      success: true,
-      message: 'Order marked as ready and customer notified',
-      order
-    });
+    res.json({ success: true, message: 'Order marked as ready', order });
   } catch (error) {
-    console.error('❌ Error marking order ready:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error updating order'
-    });
+    res.status(500).json({ success: false, message: 'Error updating order' });
   }
 };
 
-
-
-
-
-
-
-
-
 // @desc    Update order status
 // @route   PUT /api/admin/orders/:orderId/status
-// @access  Private (Restaurant)
 exports.updateOrderStatus = async (req, res) => {
   try {
     const { status } = req.body;
-    
     const validStatuses = ['received', 'preparing', 'ready', 'completed', 'cancelled'];
     if (!validStatuses.includes(status)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid status'
-      });
+      return res.status(400).json({ success: false, message: 'Invalid status' });
     }
 
-    const order = await Order.findOne({
-      _id: req.params.orderId,
-      restaurantId: req.restaurant._id
-    });
-
-    if (!order) {
-      return res.status(404).json({
-        success: false,
-        message: 'Order not found'
-      });
-    }
+    const order = await Order.findOne({ _id: req.params.orderId, restaurantId: req.restaurant._id });
+    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
 
     order.orderStatus = status;
-    
-    // Auto-mark as ready when status is 'ready'
     if (status === 'ready' && !order.isReady) {
       order.isReady = true;
       order.readyAt = new Date();
     }
-
     await order.save();
 
-    console.log(`✅ Order ${order._id} status updated to ${status}`);
-
-    res.json({
-      success: true,
-      order
-    });
+    res.json({ success: true, order });
   } catch (error) {
-    console.error('❌ Error updating order status:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error updating order status'
-    });
+    res.status(500).json({ success: false, message: 'Error updating order status' });
   }
 };
 
-// @desc    Get order analytics
+// @desc    Get analytics — supports startDate/endDate OR period
 // @route   GET /api/admin/orders/analytics
-// @access  Private (Restaurant)
 exports.getAnalytics = async (req, res) => {
   try {
-    const { period = 'day' } = req.query;
-    
-    const now = new Date();
-    let startDate;
-    
-    switch(period) {
-      case 'week':
-        startDate = new Date(now.setDate(now.getDate() - 7));
-        break;
-      case 'month':
-        startDate = new Date(now.setMonth(now.getMonth() - 1));
-        break;
-      default:
-        startDate = new Date(now.setHours(0, 0, 0, 0));
+    const { period, startDate, endDate } = req.query;
+
+    const query = {
+      restaurantId: req.restaurant._id,
+      paymentStatus: 'paid'
+    };
+
+    // If explicit dates passed, use them (from calendar)
+    if (startDate || endDate) {
+      query.createdAt = {};
+      if (startDate) query.createdAt.$gte = new Date(startDate);
+      if (endDate) query.createdAt.$lte = new Date(endDate);
+    } else {
+      // Fall back to period
+      const now = new Date();
+      let start;
+      if (period === 'week') start = new Date(now.setDate(now.getDate() - 7));
+      else if (period === 'month') start = new Date(now.getFullYear(), now.getMonth(), 1);
+      else { start = new Date(); start.setHours(0, 0, 0, 0); }
+      query.createdAt = { $gte: start };
     }
 
-    const orders = await Order.find({
-      restaurantId: req.restaurant._id,
-      createdAt: { $gte: startDate },
-      paymentStatus: 'paid'
-    });
+    const orders = await Order.find(query);
 
-    const totalRevenue = orders.reduce((sum, order) => sum + order.totalAmount, 0);
+    const totalRevenue = orders.reduce((sum, o) => sum + o.totalAmount, 0);
     const totalOrders = orders.length;
     const avgOrderValue = totalOrders > 0 ? totalRevenue / totalOrders : 0;
 
     // Group by date
     const ordersByDate = orders.reduce((acc, order) => {
       const date = order.createdAt.toISOString().split('T')[0];
-      if (!acc[date]) {
-        acc[date] = { count: 0, revenue: 0 };
-      }
+      if (!acc[date]) acc[date] = { count: 0, revenue: 0 };
       acc[date].count++;
       acc[date].revenue += order.totalAmount;
       return acc;
     }, {});
 
-    console.log(`📊 Analytics for ${period}: ${totalOrders} orders, ₹${totalRevenue} revenue`);
-
     res.json({
       success: true,
-      analytics: {
-        totalRevenue,
-        totalOrders,
-        avgOrderValue,
-        ordersByDate,
-        period
-      }
+      analytics: { totalRevenue, totalOrders, avgOrderValue, ordersByDate, period }
     });
   } catch (error) {
-    console.error('❌ Error fetching analytics:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error fetching analytics'
-    });
+    res.status(500).json({ success: false, message: 'Error fetching analytics' });
   }
 };
 
-// @desc    Export orders to Excel
+// @desc    Export orders to Excel or PDF
 // @route   GET /api/admin/orders/export
-// @access  Private (Restaurant)
 exports.exportOrders = async (req, res) => {
   try {
-    const { startDate, endDate } = req.query;
-    
+    const { startDate, endDate, format = 'excel' } = req.query;
     const query = { restaurantId: req.restaurant._id };
-    
+
     if (startDate || endDate) {
       query.createdAt = {};
       if (startDate) query.createdAt.$gte = new Date(startDate);
       if (endDate) query.createdAt.$lte = new Date(endDate);
     }
 
-    const orders = await Order.find(query).sort({ createdAt: -1 });
+    const orders = await Order.find(query).sort({ createdAt: 1 });
+    const restaurantName = req.restaurant.name;
 
-    // Create workbook
+    // ── EXCEL EXPORT ──
     const workbook = new ExcelJS.Workbook();
-    const worksheet = workbook.addWorksheet('Orders');
+    workbook.creator = 'QR Dine';
+    const ws = workbook.addWorksheet('Sales Report');
 
-    // Add headers
-    worksheet.columns = [
-      { header: 'Order ID', key: 'orderId', width: 25 },
-      { header: 'Date', key: 'date', width: 20 },
-      { header: 'Customer Name', key: 'customerName', width: 20 },
-      { header: 'Customer Phone', key: 'customerPhone', width: 15 },
-      { header: 'Table Number', key: 'tableNumber', width: 12 },
-      { header: 'Items', key: 'items', width: 40 },
-      { header: 'Total Amount', key: 'totalAmount', width: 15 },
-      { header: 'Payment Status', key: 'paymentStatus', width: 15 },
-      { header: 'Order Status', key: 'orderStatus', width: 15 }
+    // Title row
+    ws.mergeCells('A1:I1');
+    ws.getCell('A1').value = `${restaurantName} — Sales Report`;
+    ws.getCell('A1').font = { bold: true, size: 14 };
+    ws.getCell('A1').alignment = { horizontal: 'center' };
+
+    // Date range row
+    ws.mergeCells('A2:I2');
+    const fromDate = startDate ? new Date(startDate).toLocaleDateString('en-IN') : 'All time';
+    const toDate = endDate ? new Date(endDate).toLocaleDateString('en-IN') : 'All time';
+    ws.getCell('A2').value = `Period: ${fromDate} to ${toDate}`;
+    ws.getCell('A2').alignment = { horizontal: 'center' };
+    ws.getCell('A2').font = { size: 11, color: { argb: 'FF666666' } };
+
+    ws.addRow([]); // blank row
+
+    // Headers
+    ws.columns = [
+      { header: 'Order ID', key: 'orderId', width: 20 },
+      { header: 'Date & Time', key: 'date', width: 22 },
+      { header: 'Customer', key: 'customerName', width: 20 },
+      { header: 'Phone', key: 'customerPhone', width: 16 },
+      { header: 'Table', key: 'tableNumber', width: 8 },
+      { header: 'Items', key: 'items', width: 45 },
+      { header: 'Amount (₹)', key: 'totalAmount', width: 14 },
+      { header: 'Payment', key: 'paymentStatus', width: 14 },
+      { header: 'Status', key: 'orderStatus', width: 14 }
     ];
 
-    // Add data
+    // Style header row (row 4)
+    const headerRow = ws.getRow(4);
+    headerRow.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+    headerRow.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF3B82F6' } };
+    headerRow.height = 20;
+
+    // Data rows
+    let totalRevenue = 0;
     orders.forEach(order => {
-      worksheet.addRow({
-        orderId: order._id.toString(),
-        date: order.createdAt.toLocaleString(),
-        customerName: order.customerName || 'N/A',
-        customerPhone: order.customerPhone || 'N/A',
-        tableNumber: order.tableNumber,
-        items: order.items.map(i => `${i.name} x${i.quantity}`).join(', '),
-        totalAmount: `₹${order.totalAmount}`,
+      const amount = order.totalAmount || 0;
+      if (order.paymentStatus === 'paid') totalRevenue += amount;
+
+      const row = ws.addRow({
+        orderId: order._id.toString().slice(-8).toUpperCase(),
+        date: new Date(order.createdAt).toLocaleString('en-IN'),
+        customerName: order.customerName || 'Guest',
+        customerPhone: order.customerPhone || '-',
+        tableNumber: order.tableNumber || '-',
+        items: order.items?.map(i => `${i.name} x${i.quantity}`).join(', ') || '-',
+        totalAmount: amount,
         paymentStatus: order.paymentStatus,
         orderStatus: order.orderStatus
       });
+
+      // Color paid/unpaid
+      if (order.paymentStatus === 'paid') {
+        row.getCell('paymentStatus').font = { color: { argb: 'FF16A34A' } };
+      } else {
+        row.getCell('paymentStatus').font = { color: { argb: 'FFDC2626' } };
+      }
     });
 
-    // Style header
-    worksheet.getRow(1).font = { bold: true };
-    worksheet.getRow(1).fill = {
-      type: 'pattern',
-      pattern: 'solid',
-      fgColor: { argb: 'FFE0E0E0' }
-    };
+    // Total row
+    ws.addRow([]);
+    const totalRow = ws.addRow({
+      orderId: 'TOTAL',
+      customerName: `${orders.length} orders`,
+      totalAmount: totalRevenue
+    });
+    totalRow.font = { bold: true };
+    totalRow.getCell('totalAmount').font = { bold: true, color: { argb: 'FF3B82F6' } };
 
-    // Set response headers
-    res.setHeader(
-      'Content-Type',
-      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-    );
-    res.setHeader(
-      'Content-Disposition',
-      `attachment; filename=orders-${Date.now()}.xlsx`
-    );
+    // Border all cells
+    ws.eachRow((row, rowNumber) => {
+      if (rowNumber >= 4) {
+        row.eachCell(cell => {
+          cell.border = {
+            top: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+            left: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+            bottom: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+            right: { style: 'thin', color: { argb: 'FFE5E7EB' } }
+          };
+        });
+      }
+    });
 
-    // Write to response
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename=sales-report-${Date.now()}.xlsx`);
     await workbook.xlsx.write(res);
     res.end();
 
-    console.log(`📥 Exported ${orders.length} orders to Excel`);
   } catch (error) {
-    console.error('❌ Export error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error exporting orders'
-    });
+    console.error('Export error:', error);
+    res.status(500).json({ success: false, message: 'Error exporting orders' });
   }
 };
 
