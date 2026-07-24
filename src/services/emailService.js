@@ -1,33 +1,65 @@
+const dns = require('dns').promises;
 const nodemailer = require('nodemailer');
 
-// Uses Gmail SMTP (or any SMTP) via env vars:
-// SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS
-//
-// IMPORTANT: Render's outbound network can't reach IPv6 addresses, and Node's
-// DNS resolution sometimes returns an IPv6 address for smtp.gmail.com, causing
-// ENETUNREACH. The `family: 4` option plus the global `dns.setDefaultResultOrder
-// ('ipv4first')` set in server.js together force IPv4, fixing this reliably.
-const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST || 'smtp.gmail.com',
-  port: Number(process.env.SMTP_PORT) || 587,
-  secure: false,
-  requireTLS: true,
-  family: 4, // force IPv4 — fixes ENETUNREACH on Render
-  auth: {
-    user: process.env.SMTP_USER,
-    pass: process.env.SMTP_PASS
-  },
-  connectionTimeout: 15000,
-  greetingTimeout: 15000,
-  socketTimeout: 15000
-});
+/**
+ * WHY THIS FILE LOOKS LIKE THIS
+ * -----------------------------
+ * Render's outbound network cannot reach IPv6. Nodemailer (v6.7+) performs its
+ * OWN internal DNS resolution before connecting — it does not use Node's
+ * dns.lookup(). That means neither `dns.setDefaultResultOrder('ipv4first')` nor
+ * the socket-level `family: 4` option can influence it, and it kept resolving
+ * smtp.gmail.com to an IPv6 address → ENETUNREACH.
+ *
+ * The fix: resolve the IPv4 (A record) ourselves and pass the literal IP as the
+ * host. Nodemailer sees an IP and skips DNS entirely. We then set
+ * `tls.servername` to the real hostname so the TLS certificate still validates.
+ */
+
+const SMTP_HOST = process.env.SMTP_HOST || 'smtp.gmail.com';
+
+// Cache the resolved IP so we don't hit DNS on every single email
+let cachedIp = null;
+let cachedAt = 0;
+const CACHE_MS = 10 * 60 * 1000; // 10 minutes
+
+async function resolveIpv4(hostname) {
+  const now = Date.now();
+  if (cachedIp && now - cachedAt < CACHE_MS) return cachedIp;
+
+  const addresses = await dns.resolve4(hostname); // A records only — never IPv6
+  if (!addresses || addresses.length === 0) {
+    throw new Error(`Could not resolve an IPv4 address for ${hostname}`);
+  }
+  cachedIp = addresses[0];
+  cachedAt = now;
+  return cachedIp;
+}
 
 /**
- * Send a 6-digit OTP to the restaurant owner's registered email,
- * used to reset their Razorpay Vault password.
+ * Build a transporter pointed at a literal IPv4 address.
+ * port 587 => STARTTLS (secure: false), port 465 => implicit SSL (secure: true)
  */
-async function sendVaultOtpEmail(toEmail, otp, restaurantName) {
-  const mailOptions = {
+function buildTransporter(ip, port) {
+  return nodemailer.createTransport({
+    host: ip,                 // literal IP — no DNS lookup happens
+    port,
+    secure: port === 465,
+    requireTLS: port === 587,
+    tls: {
+      servername: SMTP_HOST   // validate cert against the real hostname
+    },
+    auth: {
+      user: process.env.SMTP_USER,
+      pass: process.env.SMTP_PASS
+    },
+    connectionTimeout: 15000,
+    greetingTimeout: 15000,
+    socketTimeout: 20000
+  });
+}
+
+function buildOtpMail(toEmail, otp, restaurantName) {
+  return {
     from: `"QR Dine" <${process.env.SMTP_USER}>`,
     to: toEmail,
     subject: 'QR Dine — Razorpay Vault Password Reset OTP',
@@ -44,8 +76,34 @@ async function sendVaultOtpEmail(toEmail, otp, restaurantName) {
       </div>
     `
   };
+}
 
-  await transporter.sendMail(mailOptions);
+/**
+ * Send a 6-digit OTP to the restaurant owner's registered email.
+ * Tries port 587 (STARTTLS) first, then falls back to 465 (SSL).
+ */
+async function sendVaultOtpEmail(toEmail, otp, restaurantName) {
+  if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
+    throw new Error('SMTP_USER / SMTP_PASS are not set in environment variables');
+  }
+
+  const ip = await resolveIpv4(SMTP_HOST);
+  console.log(`[email] ${SMTP_HOST} resolved to IPv4 ${ip}`);
+
+  const mail = buildOtpMail(toEmail, otp, restaurantName);
+
+  // Try the configured/default port first, then the other one as fallback.
+  const primaryPort = Number(process.env.SMTP_PORT) || 587;
+  const fallbackPort = primaryPort === 587 ? 465 : 587;
+
+  try {
+    await buildTransporter(ip, primaryPort).sendMail(mail);
+    console.log(`[email] OTP sent to ${toEmail} via port ${primaryPort}`);
+  } catch (err) {
+    console.error(`[email] Port ${primaryPort} failed (${err.code || err.message}). Trying ${fallbackPort}...`);
+    await buildTransporter(ip, fallbackPort).sendMail(mail);
+    console.log(`[email] OTP sent to ${toEmail} via fallback port ${fallbackPort}`);
+  }
 }
 
 module.exports = { sendVaultOtpEmail };

@@ -1,10 +1,12 @@
 const dns = require('dns');
 dns.setServers(['8.8.8.8', '1.1.1.1']);
-// Render's outbound network can't reach IPv6 addresses. By default, Node may
-// still resolve hosts (like smtp.gmail.com) to an IPv6 address first, causing
-// ENETUNREACH. This forces IPv4 to be tried first for ALL outbound connections
-// app-wide (email, APIs, etc.) — the reliable fix for this exact Render issue.
-dns.setDefaultResultOrder('ipv4first');
+// Render's outbound network cannot reach IPv6. Prefer IPv4 for every outbound
+// connection made through Node's dns.lookup() (MongoDB, Cloudinary, Razorpay,
+// etc.). Note: Nodemailer does its own DNS internally and ignores this, which is
+// why emailService.js resolves the SMTP IPv4 address itself.
+if (typeof dns.setDefaultResultOrder === 'function') {
+  dns.setDefaultResultOrder('ipv4first');
+}
 
 require('dotenv').config(); // MUST be first
 
