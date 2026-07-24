@@ -1,109 +1,111 @@
-const dns = require('dns').promises;
 const nodemailer = require('nodemailer');
 
 /**
- * WHY THIS FILE LOOKS LIKE THIS
- * -----------------------------
- * Render's outbound network cannot reach IPv6. Nodemailer (v6.7+) performs its
- * OWN internal DNS resolution before connecting — it does not use Node's
- * dns.lookup(). That means neither `dns.setDefaultResultOrder('ipv4first')` nor
- * the socket-level `family: 4` option can influence it, and it kept resolving
- * smtp.gmail.com to an IPv6 address → ENETUNREACH.
+ * WHY THIS FILE USES AN HTTP API INSTEAD OF SMTP
+ * ----------------------------------------------
+ * Render blocks outbound SMTP ports (25, 465, 587) to prevent spam abuse.
+ * Connections to smtp.gmail.com time out with ETIMEDOUT no matter what — this
+ * is a platform restriction, not a code problem.
  *
- * The fix: resolve the IPv4 (A record) ourselves and pass the literal IP as the
- * host. Nodemailer sees an IP and skips DNS entirely. We then set
- * `tls.servername` to the real hostname so the TLS certificate still validates.
+ * The solution is to send email over HTTPS (port 443), which is never blocked.
+ * We use Brevo's transactional email API for this.
+ *
+ * Set BREVO_API_KEY + EMAIL_FROM in your environment variables and it just works.
+ * If BREVO_API_KEY is absent, we fall back to SMTP — useful for local development
+ * or if you ever move to a host that permits SMTP.
  */
 
-const SMTP_HOST = process.env.SMTP_HOST || 'smtp.gmail.com';
+const BREVO_API_URL = 'https://api.brevo.com/v3/smtp/email';
 
-// Cache the resolved IP so we don't hit DNS on every single email
-let cachedIp = null;
-let cachedAt = 0;
-const CACHE_MS = 10 * 60 * 1000; // 10 minutes
-
-async function resolveIpv4(hostname) {
-  const now = Date.now();
-  if (cachedIp && now - cachedAt < CACHE_MS) return cachedIp;
-
-  const addresses = await dns.resolve4(hostname); // A records only — never IPv6
-  if (!addresses || addresses.length === 0) {
-    throw new Error(`Could not resolve an IPv4 address for ${hostname}`);
-  }
-  cachedIp = addresses[0];
-  cachedAt = now;
-  return cachedIp;
+function buildOtpHtml(otp, restaurantName) {
+  return `
+    <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto; padding: 24px;">
+      <h2 style="color: #3B82F6;">QR Dine</h2>
+      <p>Hi ${restaurantName || 'there'},</p>
+      <p>You requested to reset your <strong>Razorpay Vault Password</strong>. Use the OTP below to proceed:</p>
+      <div style="background: #F0F7FF; border: 1px solid #3B82F6; border-radius: 8px; padding: 20px; text-align: center; margin: 20px 0;">
+        <span style="font-size: 32px; font-weight: bold; letter-spacing: 8px; color: #1e293b;">${otp}</span>
+      </div>
+      <p style="color: #666;">This OTP is valid for <strong>10 minutes</strong>. If you did not request this, please ignore this email — your Razorpay credentials remain secure.</p>
+      <p style="color: #999; font-size: 12px; margin-top: 24px;">— QR Dine Security Team</p>
+    </div>
+  `;
 }
 
 /**
- * Build a transporter pointed at a literal IPv4 address.
- * port 587 => STARTTLS (secure: false), port 465 => implicit SSL (secure: true)
+ * Primary path: send over HTTPS via Brevo's API. Works on Render.
  */
-function buildTransporter(ip, port) {
-  return nodemailer.createTransport({
-    host: ip,                 // literal IP — no DNS lookup happens
-    port,
-    secure: port === 465,
-    requireTLS: port === 587,
-    tls: {
-      servername: SMTP_HOST   // validate cert against the real hostname
+async function sendViaBrevo(toEmail, subject, htmlContent) {
+  const fromEmail = process.env.EMAIL_FROM || process.env.SMTP_USER;
+
+  if (!fromEmail) {
+    throw new Error('EMAIL_FROM (or SMTP_USER) must be set as the sender address');
+  }
+
+  const response = await fetch(BREVO_API_URL, {
+    method: 'POST',
+    headers: {
+      'accept': 'application/json',
+      'api-key': process.env.BREVO_API_KEY,
+      'content-type': 'application/json'
     },
+    body: JSON.stringify({
+      sender: { name: 'QR Dine', email: fromEmail },
+      to: [{ email: toEmail }],
+      subject,
+      htmlContent
+    })
+  });
+
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(`Brevo API error ${response.status}: ${body}`);
+  }
+
+  return response.json();
+}
+
+/**
+ * Fallback path: classic SMTP. Used only when BREVO_API_KEY is not set
+ * (e.g. local development). Will time out on Render — that is expected.
+ */
+async function sendViaSmtp(toEmail, subject, htmlContent) {
+  const transporter = nodemailer.createTransport({
+    host: process.env.SMTP_HOST || 'smtp.gmail.com',
+    port: Number(process.env.SMTP_PORT) || 587,
+    secure: Number(process.env.SMTP_PORT) === 465,
     auth: {
       user: process.env.SMTP_USER,
       pass: process.env.SMTP_PASS
     },
-    connectionTimeout: 15000,
-    greetingTimeout: 15000,
-    socketTimeout: 20000
+    connectionTimeout: 15000
+  });
+
+  await transporter.sendMail({
+    from: `"QR Dine" <${process.env.SMTP_USER}>`,
+    to: toEmail,
+    subject,
+    html: htmlContent
   });
 }
 
-function buildOtpMail(toEmail, otp, restaurantName) {
-  return {
-    from: `"QR Dine" <${process.env.SMTP_USER}>`,
-    to: toEmail,
-    subject: 'QR Dine — Razorpay Vault Password Reset OTP',
-    html: `
-      <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto; padding: 24px;">
-        <h2 style="color: #3B82F6;">QR Dine</h2>
-        <p>Hi ${restaurantName || 'there'},</p>
-        <p>You requested to reset your <strong>Razorpay Vault Password</strong>. Use the OTP below to proceed:</p>
-        <div style="background: #F0F7FF; border: 1px solid #3B82F6; border-radius: 8px; padding: 20px; text-align: center; margin: 20px 0;">
-          <span style="font-size: 32px; font-weight: bold; letter-spacing: 8px; color: #1e293b;">${otp}</span>
-        </div>
-        <p style="color: #666;">This OTP is valid for <strong>10 minutes</strong>. If you did not request this, please ignore this email — your Razorpay credentials remain secure.</p>
-        <p style="color: #999; font-size: 12px; margin-top: 24px;">— QR Dine Security Team</p>
-      </div>
-    `
-  };
-}
-
 /**
- * Send a 6-digit OTP to the restaurant owner's registered email.
- * Tries port 587 (STARTTLS) first, then falls back to 465 (SSL).
+ * Send a 6-digit OTP to the restaurant owner's registered email,
+ * used to reset their Razorpay Vault password.
  */
 async function sendVaultOtpEmail(toEmail, otp, restaurantName) {
-  if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
-    throw new Error('SMTP_USER / SMTP_PASS are not set in environment variables');
+  const subject = 'QR Dine — Razorpay Vault Password Reset OTP';
+  const htmlContent = buildOtpHtml(otp, restaurantName);
+
+  if (process.env.BREVO_API_KEY) {
+    await sendViaBrevo(toEmail, subject, htmlContent);
+    console.log(`[email] OTP sent to ${toEmail} via Brevo HTTPS API`);
+    return;
   }
 
-  const ip = await resolveIpv4(SMTP_HOST);
-  console.log(`[email] ${SMTP_HOST} resolved to IPv4 ${ip}`);
-
-  const mail = buildOtpMail(toEmail, otp, restaurantName);
-
-  // Try the configured/default port first, then the other one as fallback.
-  const primaryPort = Number(process.env.SMTP_PORT) || 587;
-  const fallbackPort = primaryPort === 587 ? 465 : 587;
-
-  try {
-    await buildTransporter(ip, primaryPort).sendMail(mail);
-    console.log(`[email] OTP sent to ${toEmail} via port ${primaryPort}`);
-  } catch (err) {
-    console.error(`[email] Port ${primaryPort} failed (${err.code || err.message}). Trying ${fallbackPort}...`);
-    await buildTransporter(ip, fallbackPort).sendMail(mail);
-    console.log(`[email] OTP sent to ${toEmail} via fallback port ${fallbackPort}`);
-  }
+  console.warn('[email] BREVO_API_KEY not set — falling back to SMTP (will fail on Render)');
+  await sendViaSmtp(toEmail, subject, htmlContent);
+  console.log(`[email] OTP sent to ${toEmail} via SMTP`);
 }
 
 module.exports = { sendVaultOtpEmail };
