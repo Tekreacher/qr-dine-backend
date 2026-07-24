@@ -1,5 +1,10 @@
 const dns = require('dns');
 dns.setServers(['8.8.8.8', '1.1.1.1']);
+// Render's outbound network can't reach IPv6 addresses. By default, Node may
+// still resolve hosts (like smtp.gmail.com) to an IPv6 address first, causing
+// ENETUNREACH. This forces IPv4 to be tried first for ALL outbound connections
+// app-wide (email, APIs, etc.) — the reliable fix for this exact Render issue.
+dns.setDefaultResultOrder('ipv4first');
 
 require('dotenv').config(); // MUST be first
 
