@@ -2,14 +2,24 @@ const nodemailer = require('nodemailer');
 
 // Uses Gmail SMTP (or any SMTP) via env vars:
 // SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS
+//
+// IMPORTANT: Render's outbound network has trouble with IPv6, and Node's DNS
+// resolution sometimes returns an IPv6 address for smtp.gmail.com, causing
+// ENETUNREACH errors. Forcing `family: 4` makes the connection always use
+// IPv4, which fixes this reliably on Render.
 const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST || 'smtp.gmail.com',
   port: Number(process.env.SMTP_PORT) || 587,
   secure: false,
+  requireTLS: true,
+  family: 4, // force IPv4 — fixes ENETUNREACH on Render
   auth: {
     user: process.env.SMTP_USER,
     pass: process.env.SMTP_PASS
-  }
+  },
+  connectionTimeout: 15000,
+  greetingTimeout: 15000,
+  socketTimeout: 15000
 });
 
 /**
