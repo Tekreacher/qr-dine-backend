@@ -59,8 +59,14 @@ const restaurantSchema = new mongoose.Schema({
     qrCode: String,
     createdAt: { type: Date, default: Date.now }
   }],
-  razorpayKeyId: String,
-  razorpayKeySecret: String,
+  razorpayKeyId: { type: String, select: false },
+  razorpayKeySecret: { type: String, select: false },
+
+  // Razorpay credentials vault — protects the credentials behind a separate password
+  razorpayVaultPasswordHash: { type: String, select: false },
+  razorpayVaultEnabled: { type: Boolean, default: false },
+  razorpayOtpHash: { type: String, select: false },
+  razorpayOtpExpiry: { type: Date, select: false },
 
   // Admin approval & subscription
   isApproved: { type: Boolean, default: false },
@@ -84,7 +90,7 @@ restaurantSchema.pre('save', async function(next) {
   next();
 });
 
-// Match password
+// Match login password
 restaurantSchema.methods.matchPassword = async function(enteredPassword) {
   return await bcrypt.compare(enteredPassword, this.password);
 };
