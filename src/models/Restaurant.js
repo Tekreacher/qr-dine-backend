@@ -62,6 +62,13 @@ const restaurantSchema = new mongoose.Schema({
   razorpayKeyId: { type: String, select: false },
   razorpayKeySecret: { type: String, select: false },
 
+  // Set in the restaurant's own Razorpay Dashboard → Webhooks, alongside a
+  // URL like https://yourapi.com/api/webhook/razorpay/<restaurantId>.
+  // Needed so /api/webhook/razorpay can verify each restaurant's webhook
+  // signature with THAT restaurant's own secret (multi-tenant — there's no
+  // single global webhook secret possible here).
+  razorpayWebhookSecret: { type: String, select: false },
+
   // Razorpay credentials vault — protects the credentials behind a separate password
   razorpayVaultPasswordHash: { type: String, select: false },
   razorpayVaultEnabled: { type: Boolean, default: false },

@@ -23,28 +23,50 @@ const protectAdmin = async (req, res, next) => {
 };
 
 // @route POST /api/admin/setup
-// @desc  Create admin account (run once)
+// @desc  Create admin account (run once, then dead forever)
+//
+// ⚠️ FIX: previously the only guard was "does an admin already exist" — fine
+// day-to-day, but if that one Admin document is ever deleted (bad migration,
+// accidental Mongo delete, restored backup) this endpoint re-opens itself to
+// literally anyone on the internet. It's now also gated behind
+// ADMIN_SETUP_KEY. Set that in your .env, call /setup once, then you can
+// even remove the value from .env afterwards — the "admin already exists"
+// check keeps it closed either way.
 router.post('/setup', async (req, res) => {
   try {
+    const { setupKey, email, password, name } = req.body;
+
+    if (!process.env.ADMIN_SETUP_KEY || setupKey !== process.env.ADMIN_SETUP_KEY) {
+      return res.status(403).json({ success: false, message: 'Invalid setup key' });
+    }
+
     const existing = await Admin.findOne({});
     if (existing) return res.status(400).json({ success: false, message: 'Admin already exists' });
-    const admin = await Admin.create({ email: req.body.email, password: req.body.password, name: req.body.name || 'Super Admin' });
+
+    await Admin.create({ email, password, name: name || 'Super Admin' });
     res.json({ success: true, message: 'Admin created' });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
 });
 
-// @route POST /api/admin/login
 // @route POST /api/admin/reset-password
 // @desc  Reset admin password using a secret key (emergency use)
+//
+// ⚠️ FIX: the secret was hardcoded in source ('QRDINE_RESET_2026_PRATHAMESH')
+// — anyone with repo access (or a leaked zip, screen share, GitHub search)
+// had permanent super-admin takeover. Now read from process.env.ADMIN_RESET_SECRET.
+// Set a long random value in Render's environment variables, never in code.
 router.post('/reset-password', async (req, res) => {
   try {
     const { secretKey, email, newPassword } = req.body;
 
-    // This secret key must match — change it to something only you know
-    if (secretKey !== 'QRDINE_RESET_2026_PRATHAMESH') {
+    if (!process.env.ADMIN_RESET_SECRET || secretKey !== process.env.ADMIN_RESET_SECRET) {
       return res.status(403).json({ success: false, message: 'Invalid secret key' });
+    }
+
+    if (!newPassword || newPassword.length < 6) {
+      return res.status(400).json({ success: false, message: 'Password must be at least 6 characters' });
     }
 
     const admin = await Admin.findOne({ email });
@@ -93,7 +115,6 @@ router.put('/restaurants/:id/approve', protectAdmin, async (req, res) => {
     if (!restaurant) return res.status(404).json({ success: false, message: 'Not found' });
     restaurant.isApproved = true;
     restaurant.isActive = true;
-    // Set subscription for 30 days from approval
     restaurant.subscriptionExpiry = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
     restaurant.subscriptionStatus = 'active';
     await restaurant.save();

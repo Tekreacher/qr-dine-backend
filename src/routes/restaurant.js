@@ -130,6 +130,57 @@ router.put('/razorpay', protect, async (req, res) => {
   }
 });
 
+// ============================================================================
+// PATCH FOR: backend/src/routes/restaurant.js
+//
+// This is a NEW route — add it anywhere after the existing `/razorpay` PUT
+// route (around line 130, right after that route's closing `});`).
+// It lets a logged-in restaurant save the webhook secret they generate in
+// their own Razorpay Dashboard → Settings → Webhooks, so your new
+// routes/webhook.js can verify signatures per-restaurant.
+//
+// Also requires the Restaurant.js model update (already provided separately)
+// which adds the `razorpayWebhookSecret` field.
+// ============================================================================
+
+// @route   PUT /api/restaurant/razorpay-webhook-secret
+// @desc    Save the webhook secret this restaurant generated in their own
+//          Razorpay Dashboard (Settings → Webhooks → Add New Webhook).
+//          Tell restaurants to point the webhook URL at:
+//            https://<your-api-domain>/api/webhook/razorpay/<their restaurantId>
+//          (their restaurantId is visible on their dashboard / can be
+//          returned from GET /api/restaurant/profile as `_id`)
+//          Active events to select: payment.captured, payment.failed
+// @access  Private
+router.put('/razorpay-webhook-secret', protect, async (req, res) => {
+  try {
+    const { webhookSecret } = req.body;
+
+    if (!webhookSecret || webhookSecret.trim().length < 8) {
+      return res.status(400).json({
+        success: false,
+        message: 'A valid webhook secret is required'
+      });
+    }
+
+    const restaurant = await Restaurant.findById(req.restaurant._id);
+    restaurant.razorpayWebhookSecret = webhookSecret.trim();
+    await restaurant.save();
+
+    res.json({
+      success: true,
+      message: 'Webhook secret saved. Your webhook URL is:',
+      webhookUrl: `${req.protocol}://${req.get('host')}/api/webhook/razorpay/${restaurant._id}`
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error saving webhook secret'
+    });
+  }
+});
+
+
 // @route   POST /api/restaurant/razorpay-vault/set-password
 // @desc    Set a password to secure/hide Razorpay credentials for the first time
 // @access  Private

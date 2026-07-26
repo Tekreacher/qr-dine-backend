@@ -1,6 +1,8 @@
 const Order = require('../models/Order');
 const ExcelJS = require('exceljs');
 const PDFDocument = require('pdfkit');
+const Restaurant = require('../models/Restaurant');
+const { refundPayment } = require('../services/razorpay');
 
 // @desc    Get all orders for restaurant with date filter
 // @route   GET /api/admin/orders
@@ -75,6 +77,67 @@ exports.updateOrderStatus = async (req, res) => {
     res.status(500).json({ success: false, message: 'Error updating order status' });
   }
 };
+
+
+// @desc    Refund a paid order (full or partial) and mark it cancelled
+// @route   POST /api/admin/orders/:orderId/refund
+// @access  Private (restaurant dashboard)
+exports.refundOrder = async (req, res) => {
+  try {
+    const { amount } = req.body; // optional — omit for full refund
+
+    const order = await Order.findOne({ _id: req.params.orderId, restaurantId: req.restaurant._id });
+    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+
+    if (order.paymentStatus !== 'paid') {
+      return res.status(400).json({ success: false, message: 'Only paid orders can be refunded' });
+    }
+
+    if (!order.razorpayPaymentId) {
+      return res.status(400).json({ success: false, message: 'No payment record on this order' });
+    }
+
+    const restaurant = await Restaurant.findById(req.restaurant._id)
+      .select('+razorpayKeyId +razorpayKeySecret');
+
+    const refund = await refundPayment(
+      order.razorpayPaymentId,
+      restaurant.razorpayKeyId,
+      restaurant.razorpayKeySecret,
+      amount
+    );
+
+    order.paymentStatus = 'failed'; // "failed" doubles as "not currently paid" in this schema
+    order.orderStatus = 'cancelled';
+    await order.save();
+
+    res.json({
+      success: true,
+      message: amount ? 'Partial refund issued' : 'Full refund issued',
+      refund,
+      order
+    });
+  } catch (error) {
+    console.error('❌ Refund error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Error processing refund'
+    });
+  }
+};
+
+// ============================================================================
+// NOTE ON THE SCHEMA: paymentStatus only has 'pending' | 'paid' | 'failed' —
+// there's no 'refunded' state. If you want refunds to show distinctly from
+// genuine payment failures in your dashboard/analytics, add 'refunded' to
+// the enum in models/Order.js:
+//   paymentStatus: { type: String, enum: ['pending','paid','failed','refunded'], default: 'pending' }
+// and use order.paymentStatus = 'refunded' above instead of 'failed'.
+// Left as a manual choice since it touches your Analytics.jsx filtering too.
+// =======================
+
+
+
 
 // @desc    Get analytics — supports startDate/endDate OR period
 // @route   GET /api/admin/orders/analytics

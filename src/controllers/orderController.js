@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const Order = require('../models/Order');
 const Restaurant = require('../models/Restaurant');
 const { createRazorpayOrder } = require('../services/razorpay');
@@ -26,8 +27,14 @@ exports.createOrder = async (req, res) => {
       });
     }
 
-    // Get restaurant
-    const restaurant = await Restaurant.findById(restaurantId).select('+razorpayKeySecret');
+    // ⚠️ THE FIX: razorpayKeyId is `select: false` in the Restaurant schema,
+    // so it MUST be explicitly re-selected here. Previously only
+    // `+razorpayKeySecret` was selected, which made restaurant.razorpayKeyId
+    // always `undefined` and pushed every order into the
+    // "Payment integration not configured" branch below.
+    const restaurant = await Restaurant.findById(restaurantId)
+      .select('+razorpayKeyId +razorpayKeySecret');
+
     if (!restaurant) {
       return res.status(404).json({
         success: false,
@@ -37,13 +44,28 @@ exports.createOrder = async (req, res) => {
 
     console.log('🏪 Restaurant found:', restaurant.name);
 
+    // Block ordering for restaurants that are disabled / unapproved / expired
+    if (!restaurant.isApproved || !restaurant.isActive) {
+      return res.status(403).json({
+        success: false,
+        message: 'This restaurant is not currently accepting orders.'
+      });
+    }
+
+    if (restaurant.subscriptionExpiry && restaurant.subscriptionExpiry < new Date()) {
+      return res.status(403).json({
+        success: false,
+        message: 'This restaurant is not currently accepting orders.'
+      });
+    }
+
     // Calculate total and build order items
     let totalAmount = 0;
     const orderItems = [];
 
     for (const item of items) {
       const menuItem = restaurant.menuItems.id(item.menuItemId);
-      
+
       if (!menuItem) {
         console.error('❌ Menu item not found:', item.menuItemId);
         return res.status(400).json({
@@ -59,20 +81,38 @@ exports.createOrder = async (req, res) => {
         });
       }
 
-      const itemTotal = menuItem.price * item.quantity;
+      const qty = Number(item.quantity);
+      if (!Number.isInteger(qty) || qty < 1 || qty > 99) {
+        return res.status(400).json({
+          success: false,
+          message: `Invalid quantity for ${menuItem.name}`
+        });
+      }
+
+      const itemTotal = menuItem.price * qty;
       totalAmount += itemTotal;
 
       orderItems.push({
         menuItemId: item.menuItemId,
         name: menuItem.name,
         price: menuItem.price,
-        quantity: item.quantity
+        quantity: qty
       });
 
-      console.log('✅ Added item:', menuItem.name, 'x', item.quantity, '= ₹', itemTotal);
+      console.log('✅ Added item:', menuItem.name, 'x', qty, '= ₹', itemTotal);
     }
 
+    // Guard against floating-point drift (e.g. 799.97 + 4.35 style totals)
+    totalAmount = Math.round(totalAmount * 100) / 100;
+
     console.log('💰 Total amount:', totalAmount);
+
+    if (totalAmount <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Order total must be greater than zero'
+      });
+    }
 
     // Create order in database
     const order = await Order.create({
@@ -83,7 +123,7 @@ exports.createOrder = async (req, res) => {
       customerName: customerName || 'Guest',
       tableNumber: tableNumber || 'N/A',
       paymentStatus: 'pending',
-      orderStatus: 'pending' // Changed from 'received' to 'pending' initially
+      orderStatus: 'pending'
     });
 
     console.log('✅ Order created in DB:', order._id);
@@ -108,28 +148,35 @@ exports.createOrder = async (req, res) => {
           order,
           razorpayOrderId: razorpayOrder.id,
           razorpayKeyId: restaurant.razorpayKeyId,
-          amount: totalAmount
+          amount: totalAmount,
+          amountInPaise: Math.round(totalAmount * 100)
         });
       } catch (razorpayError) {
         console.error('❌ Razorpay error:', razorpayError);
-        
-        // Even if Razorpay fails, return the order
-        return res.status(201).json({
-          success: true,
+
+        // Mark the order as failed so it doesn't sit forever as "pending"
+        order.paymentStatus = 'failed';
+        await order.save();
+
+        return res.status(502).json({
+          success: false,
           order,
-          message: 'Order created but payment initialization failed',
+          message:
+            'Could not start the payment. The restaurant’s payment keys may be invalid or expired.',
           razorpayError: razorpayError.message
         });
       }
     }
 
-    // No payment configured - return order anyway
-    console.log('⚠️ No Razorpay configured');
-    
-    res.status(201).json({
+    // No payment configured — the restaurant genuinely has not saved keys yet
+    console.log('⚠️ No Razorpay configured for restaurant', restaurant._id.toString());
+
+    return res.status(201).json({
       success: true,
       order,
-      message: 'Order created. Payment integration not configured.'
+      paymentConfigured: false,
+      message:
+        'Order placed, but this restaurant has not connected online payments yet. Please pay at the counter.'
     });
 
   } catch (error) {
@@ -145,30 +192,58 @@ exports.createOrder = async (req, res) => {
 // @desc    Verify Razorpay payment
 // @route   POST /api/orders/verify-payment
 // @access  Public
-const crypto = require('crypto');
-
 exports.verifyPayment = async (req, res) => {
   try {
     const { razorpayOrderId, razorpayPaymentId, razorpaySignature, orderId } = req.body;
 
-    const order = await Order.findById(orderId).populate('restaurantId');
+    if (!razorpayOrderId || !razorpayPaymentId || !razorpaySignature || !orderId) {
+      return res.status(400).json({ success: false, message: 'Missing payment details' });
+    }
+
+    const order = await Order.findById(orderId);
     if (!order) {
       return res.status(404).json({ success: false, message: 'Order not found' });
     }
 
-    // Get restaurant's secret key
-    const restaurant = await Restaurant.findById(order.restaurantId).select('+razorpayKeySecret');
-    
-    // Generate signature
+    // Make sure the razorpay order id actually belongs to this order
+    if (order.razorpayOrderId && order.razorpayOrderId !== razorpayOrderId) {
+      return res.status(400).json({ success: false, message: 'Payment does not match this order' });
+    }
+
+    // Already verified — idempotent response, protects against double-submit
+    if (order.paymentStatus === 'paid') {
+      return res.json({ success: true, message: 'Payment already verified', order });
+    }
+
+    // Get restaurant's secret key (must be explicitly selected)
+    const restaurant = await Restaurant.findById(order.restaurantId)
+      .select('+razorpayKeySecret');
+
+    if (!restaurant || !restaurant.razorpayKeySecret) {
+      return res.status(500).json({
+        success: false,
+        message: 'Restaurant payment configuration missing'
+      });
+    }
+
+    // Generate and compare signature
     const text = razorpayOrderId + '|' + razorpayPaymentId;
     const generatedSignature = crypto
       .createHmac('sha256', restaurant.razorpayKeySecret)
       .update(text)
       .digest('hex');
 
-    // Verify signature
-    if (generatedSignature !== razorpaySignature) {
-      console.error('❌ Payment signature verification failed');
+    const valid =
+      generatedSignature.length === String(razorpaySignature).length &&
+      crypto.timingSafeEqual(
+        Buffer.from(generatedSignature),
+        Buffer.from(String(razorpaySignature))
+      );
+
+    if (!valid) {
+      console.error('❌ Payment signature verification failed for order', orderId);
+      order.paymentStatus = 'failed';
+      await order.save();
       return res.status(400).json({
         success: false,
         message: 'Invalid payment signature - Payment verification failed'
@@ -177,7 +252,6 @@ exports.verifyPayment = async (req, res) => {
 
     console.log('✅ Payment signature verified');
 
-    // Update order
     order.razorpayPaymentId = razorpayPaymentId;
     order.razorpaySignature = razorpaySignature;
     order.paymentStatus = 'paid';
@@ -205,7 +279,7 @@ exports.getOrderStatus = async (req, res) => {
   try {
     const order = await Order.findById(req.params.orderId)
       .populate('restaurantId', 'name phone address');
-    
+
     if (!order) {
       return res.status(404).json({
         success: false,
@@ -236,28 +310,23 @@ exports.getOrderStatus = async (req, res) => {
   }
 };
 
-
-
-
+// @desc    Get full order details
+// @route   GET /api/orders/:orderId
+// @access  Public
 exports.getOrderById = async (req, res) => {
   try {
     const { orderId } = req.params;
 
     const order = await Order.findById(orderId);
     if (!order) {
-      return res.status(404).json({ message: "Order not found" });
+      return res.status(404).json({ message: 'Order not found' });
     }
 
     res.status(200).json(order);
   } catch (error) {
     console.error(error);
-    res.status(500).json({ message: "Server error" });
+    res.status(500).json({ message: 'Server error' });
   }
 };
-
-
-
-
-
 
 module.exports = exports;

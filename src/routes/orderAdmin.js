@@ -21,4 +21,10 @@ router.put('/:orderId/ready', orderAdminController.markOrderReady);
 // @route   PUT /api/admin/orders/:orderId/status
 router.put('/:orderId/status', orderAdminController.updateOrderStatus);
 
+
+// @route   POST /api/admin/orders/:orderId/refund
+router.post('/:orderId/refund', orderAdminController.refundOrder);
+
+
+
 module.exports = router;
