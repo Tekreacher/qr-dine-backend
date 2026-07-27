@@ -79,10 +79,12 @@ router.put('/profile', protect, async (req, res) => {
 // @route   GET /api/restaurant/razorpay-status
 // @desc    Get Razorpay configuration status (masked, never exposes secret)
 // @access  Private
+
+
 router.get('/razorpay-status', protect, async (req, res) => {
   try {
     const restaurant = await Restaurant.findById(req.restaurant._id)
-      .select('+razorpayKeyId +razorpayKeySecret +razorpayVaultEnabled');
+      .select('+razorpayKeyId +razorpayKeySecret +razorpayVaultEnabled +razorpayWebhookSecret');
 
     const configured = !!(restaurant.razorpayKeyId && restaurant.razorpayKeySecret);
 
@@ -90,12 +92,16 @@ router.get('/razorpay-status', protect, async (req, res) => {
       success: true,
       configured,
       vaultEnabled: !!restaurant.razorpayVaultEnabled,
-      maskedKeyId: configured ? maskKeyId(restaurant.razorpayKeyId) : null
+      maskedKeyId: configured ? maskKeyId(restaurant.razorpayKeyId) : null,
+      webhookConfigured: !!restaurant.razorpayWebhookSecret,
+      restaurantId: restaurant._id
     });
   } catch (error) {
     res.status(500).json({ success: false, message: 'Error fetching Razorpay status' });
   }
 });
+
+
 
 // @route   PUT /api/restaurant/razorpay
 // @desc    Save/update Razorpay credentials (owner is already authenticated via dashboard login)
