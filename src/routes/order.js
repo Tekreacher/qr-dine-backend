@@ -17,10 +17,14 @@ router.post('/verify-payment', orderController.verifyPayment);
 // @access  Public
 router.get('/:orderId/status', orderController.getOrderStatus);
 
+// @route   GET /api/orders/:orderId/bill
+// @desc    Download PDF bill/receipt for an order
+// @access  Public
+router.get('/:orderId/bill', orderController.downloadBill);
+
 // @route   GET /api/orders/:orderId
 // @desc    Get full order details
 // @access  Public
 router.get('/:orderId', orderController.getOrderById);
-
 
 module.exports = router;
