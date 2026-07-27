@@ -3,6 +3,42 @@ const router = express.Router();
 const Customer = require('../models/Customer');
 const Order = require('../models/Order');
 
+/**
+ * SELF-HEAL: if a customer's currentOrderId points at an order that is
+ * already completed or cancelled (or deleted), move it to history and
+ * clear it — right at read time. This guarantees a returning customer
+ * NEVER sees a finished order as their "current order", even if every
+ * other cleanup path failed (customer closed the tab, old stale data
+ * from before this fix, etc).
+ */
+async function healCurrentOrder(customer) {
+  if (!customer || !customer.currentOrderId) return customer;
+
+  try {
+    const order = await Order.findById(customer.currentOrderId).select('orderStatus');
+
+    if (!order || order.orderStatus === 'completed' || order.orderStatus === 'cancelled') {
+      if (order && order.orderStatus === 'completed') {
+        const alreadyInHistory = customer.orderHistory.some(
+          h => h.orderId && h.orderId.toString() === customer.currentOrderId.toString()
+        );
+        if (!alreadyInHistory) {
+          customer.orderHistory.push({
+            orderId: customer.currentOrderId,
+            completedAt: new Date()
+          });
+        }
+        customer.isExistingCustomer = true;
+      }
+      customer.currentOrderId = null;
+      await customer.save();
+    }
+  } catch (e) {
+    console.error('healCurrentOrder error:', e);
+  }
+  return customer;
+}
+
 // @route   GET /api/customer/lookup?phone=xxx&restaurantId=xxx
 // @desc    Look up customer by phone number and restaurant
 // @access  Public
@@ -14,11 +50,13 @@ router.get('/lookup', async (req, res) => {
       return res.status(400).json({ success: false, message: 'phone and restaurantId required' });
     }
 
-    const customer = await Customer.findOne({ phone, restaurantId });
+    let customer = await Customer.findOne({ phone, restaurantId });
 
     if (!customer) {
       return res.json({ success: true, found: false });
     }
+
+    customer = await healCurrentOrder(customer);
 
     res.json({
       success: true,
@@ -78,11 +116,13 @@ router.post('/create-or-get', async (req, res) => {
 // @access  Public
 router.get('/:customerId/profile', async (req, res) => {
   try {
-    const customer = await Customer.findOne({ customerId: req.params.customerId });
+    let customer = await Customer.findOne({ customerId: req.params.customerId });
 
     if (!customer) {
       return res.status(404).json({ success: false, message: 'Customer not found' });
     }
+
+    customer = await healCurrentOrder(customer);
 
     res.json({
       success: true,

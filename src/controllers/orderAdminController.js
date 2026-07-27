@@ -4,6 +4,41 @@ const PDFDocument = require('pdfkit');
 const Restaurant = require('../models/Restaurant');
 const { refundPayment } = require('../services/razorpay');
 
+const Customer = require('../models/Customer');
+
+/**
+ * When the restaurant finishes (or cancels) an order, clear it from the
+ * customer's "current order" pointer and file it into their history —
+ * SERVER-SIDE, so it works even if the customer closed their phone and
+ * never looks at the status page again. This is the root fix for
+ * "old order still shows as current order on next visit".
+ */
+async function clearCustomerCurrentOrder(order) {
+  try {
+    const customer = await Customer.findOne({
+      restaurantId: order.restaurantId,
+      currentOrderId: order._id
+    });
+    if (!customer) return; // nobody points at this order — nothing to do
+
+    if (order.orderStatus === 'completed') {
+      const alreadyInHistory = customer.orderHistory.some(
+        h => h.orderId && h.orderId.toString() === order._id.toString()
+      );
+      if (!alreadyInHistory) {
+        customer.orderHistory.push({ orderId: order._id, completedAt: new Date() });
+      }
+      customer.isExistingCustomer = true;
+    }
+
+    customer.currentOrderId = null;
+    await customer.save();
+  } catch (e) {
+    // Never let cleanup failure break the status update itself
+    console.error('Error clearing customer current order:', e);
+  }
+}
+
 // @desc    Get all orders for restaurant with date filter
 // @route   GET /api/admin/orders
 exports.getRestaurantOrders = async (req, res) => {
@@ -72,12 +107,16 @@ exports.updateOrderStatus = async (req, res) => {
     }
     await order.save();
 
+    // Finished orders must not linger as anyone's "current order"
+    if (status === 'completed' || status === 'cancelled') {
+      await clearCustomerCurrentOrder(order);
+    }
+
     res.json({ success: true, order });
   } catch (error) {
     res.status(500).json({ success: false, message: 'Error updating order status' });
   }
 };
-
 
 // @desc    Refund a paid order (full or partial) and mark it cancelled
 // @route   POST /api/admin/orders/:orderId/refund
@@ -111,6 +150,9 @@ exports.refundOrder = async (req, res) => {
     order.orderStatus = 'cancelled';
     await order.save();
 
+    // A refunded/cancelled order must not linger as anyone's "current order"
+    await clearCustomerCurrentOrder(order);
+
     res.json({
       success: true,
       message: amount ? 'Partial refund issued' : 'Full refund issued',
@@ -134,10 +176,7 @@ exports.refundOrder = async (req, res) => {
 //   paymentStatus: { type: String, enum: ['pending','paid','failed','refunded'], default: 'pending' }
 // and use order.paymentStatus = 'refunded' above instead of 'failed'.
 // Left as a manual choice since it touches your Analytics.jsx filtering too.
-// =======================
-
-
-
+// ============================================================================
 
 // @desc    Get analytics — supports startDate/endDate OR period
 // @route   GET /api/admin/orders/analytics
