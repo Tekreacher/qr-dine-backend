@@ -70,6 +70,33 @@ const orderLimiter = rateLimit({
   message: { success: false, message: 'Too many orders from this device. Please wait a few minutes.' }
 });
 
+// ── Customer route limiting: TWO tiers, because the risk is different ──
+//
+// Tier 1 (tight) — /api/customer/lookup only. This is the endpoint an
+// attacker abuses to harvest names by scripting through phone numbers.
+// A real diner types their phone once or twice per visit, so 20 tries
+// per 5 minutes is generous for humans and useless for scripts.
+const lookupLimiter = rateLimit({
+  windowMs: 5 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, message: 'Too many lookups. Please wait a few minutes and try again.' }
+});
+
+// Tier 2 (loose) — everything else under /api/customer. The menu page
+// polls the profile every 10s (~30 req/5min per open customer), and a
+// whole restaurant's diners share ONE WiFi IP. 1000 per 5 min supports
+// ~30 customers browsing simultaneously on the same network while still
+// capping runaway scripts and infinite loops.
+const customerLimiter = rateLimit({
+  windowMs: 5 * 60 * 1000,
+  max: 1000,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, message: 'Too many requests. Please wait a few minutes.' }
+});
+
 /* ===============================
    WEBHOOK — MUST BE MOUNTED BEFORE express.json()
 ================================ */
@@ -95,11 +122,19 @@ app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
 /* ===============================
    ROUTES
 ================================ */
-app.use('/api/customer', require('./routes/customer'));
+// The tight lookup limiter must be registered on the specific path FIRST,
+// then the loose limiter guards the rest of the customer routes.
+app.use('/api/customer/lookup', lookupLimiter);
+app.use('/api/customer', customerLimiter, require('./routes/customer'));
 app.use('/api/auth', authLimiter, require('./routes/auth'));
 app.use('/api/restaurant', require('./routes/restaurant'));
 app.use('/api/menu', require('./routes/menu'));
-app.use('/api/orders', orderLimiter, require('./routes/order'));
+// Tight limit ONLY on order creation + payment verification (the abusable
+// actions). Status polling and bill downloads under /api/orders stay on the
+// loose customer-tier limit so a table refreshing status never gets blocked.
+app.use('/api/orders/create', orderLimiter);
+app.use('/api/orders/verify-payment', orderLimiter);
+app.use('/api/orders', customerLimiter, require('./routes/order'));
 app.use('/api/admin/orders', require('./routes/orderAdmin'));
 app.use('/api/order-status', require('./routes/orderStatus'));
 app.use('/api/admin', authLimiter, require('./routes/admin'));
@@ -115,11 +150,13 @@ app.get('/health', (req, res) => {
    ERROR HANDLER
 ================================ */
 app.use((err, req, res, next) => {
+  // Full detail stays in server logs only — clients get a generic message so
+  // internal wording (driver errors, file paths) can never leak outward.
   console.error('❌ Error:', err);
-  res.status(err.status || 500).json({
-    success: false,
-    message: err.message || 'Internal Server Error'
-  });
+  const safeMessage = err.status && err.status < 500 && err.message
+    ? err.message                      // deliberate 4xx messages (e.g. CORS) are fine
+    : 'Internal Server Error';
+  res.status(err.status || 500).json({ success: false, message: safeMessage });
 });
 
 module.exports = app;

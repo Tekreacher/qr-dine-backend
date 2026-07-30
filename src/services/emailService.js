@@ -99,13 +99,15 @@ async function sendVaultOtpEmail(toEmail, otp, restaurantName) {
 
   if (process.env.BREVO_API_KEY) {
     await sendViaBrevo(toEmail, subject, htmlContent);
-    console.log(`[email] OTP sent to ${toEmail} via Brevo HTTPS API`);
+    //console.log(`[email] OTP sent to ${toEmail} via Brevo HTTPS API`);
+    console.log('[email] OTP sent via Brevo HTTPS API');
     return;
   }
 
   console.warn('[email] BREVO_API_KEY not set — falling back to SMTP (will fail on Render)');
   await sendViaSmtp(toEmail, subject, htmlContent);
-  console.log(`[email] OTP sent to ${toEmail} via SMTP`);
+  //console.log(`[email] OTP sent to ${toEmail} via SMTP`);
+  console.log('[email] OTP sent via SMTP');
 }
 
 module.exports = { sendVaultOtpEmail };

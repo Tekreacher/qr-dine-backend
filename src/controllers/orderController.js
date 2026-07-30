@@ -10,7 +10,13 @@ exports.createOrder = async (req, res) => {
   try {
     const { restaurantId, items, customerPhone, customerName, tableNumber } = req.body;
 
-    console.log('📦 Creating order:', { restaurantId, items, customerPhone, customerName, tableNumber });
+    console.log('📦 Creating order:', {
+      restaurantId,
+      itemCount: Array.isArray(items) ? items.length : 0,
+      tableNumber,
+      customerPhone: customerPhone ? `${String(customerPhone).slice(0, 2)}******${String(customerPhone).slice(-2)}` : '',
+      customerName: '[REDACTED]'
+    });
 
     // Validation
     if (!restaurantId || !items || items.length === 0) {

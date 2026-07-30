@@ -67,7 +67,9 @@ router.get('/lookup', async (req, res) => {
         phone: customer.phone,
         isExistingCustomer: customer.isExistingCustomer,
         currentOrderId: customer.currentOrderId,
-        orderHistory: customer.orderHistory,
+        // orderHistory deliberately NOT returned here — the menu page doesn't
+        // use it, and omitting it means a phone-number lookup reveals as
+        // little as possible. Full history stays behind /:customerId/order-history.
         firstVisit: customer.firstVisit,
         lastVisit: customer.lastVisit
       }
