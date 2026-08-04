@@ -15,9 +15,15 @@ async function healCurrentOrder(customer) {
   if (!customer || !customer.currentOrderId) return customer;
 
   try {
-    const order = await Order.findById(customer.currentOrderId).select('orderStatus');
+    const order = await Order.findById(customer.currentOrderId)
+      .select('orderStatus paymentStatus');
 
-    if (!order || order.orderStatus === 'completed' || order.orderStatus === 'cancelled') {
+    // An unpaid order that staff never accepted is NOT a placed order — it
+    // must never sit as someone's current order. This also self-repairs any
+    // bad pointers created before this fix.
+    const isUnplaced = order && order.paymentStatus !== 'paid' && order.orderStatus === 'pending';
+
+    if (!order || isUnplaced || order.orderStatus === 'completed' || order.orderStatus === 'cancelled') {
       if (order && order.orderStatus === 'completed') {
         const alreadyInHistory = customer.orderHistory.some(
           h => h.orderId && h.orderId.toString() === customer.currentOrderId.toString()
@@ -154,6 +160,26 @@ router.put('/:customerId/current-order', async (req, res) => {
 
     if (!customer) {
       return res.status(404).json({ success: false, message: 'Customer not found' });
+    }
+
+    // Server-side guard: never let an unpaid, unaccepted order become the
+    // customer's current order, whatever the client sends. The one exception
+    // is a restaurant with no online payment configured, where paying at the
+    // counter is the normal flow and the order has no Razorpay attempt.
+    const order = await Order.findById(orderId).select('orderStatus paymentStatus razorpayOrderId');
+    if (!order) {
+      return res.status(404).json({ success: false, message: 'Order not found' });
+    }
+
+    const isPaid = order.paymentStatus === 'paid';
+    const staffAccepted = order.orderStatus !== 'pending';
+    const cashOnlyRestaurant = !order.razorpayOrderId;
+
+    if (!isPaid && !staffAccepted && !cashOnlyRestaurant) {
+      return res.status(400).json({
+        success: false,
+        message: 'Order is not paid yet'
+      });
     }
 
     customer.currentOrderId = orderId;

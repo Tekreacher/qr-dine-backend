@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const Order = require('../models/Order');
 const Restaurant = require('../models/Restaurant');
+const Customer = require('../models/Customer');
 const { createRazorpayOrder } = require('../services/razorpay');
 
 // @desc    Create new order
@@ -264,6 +265,11 @@ exports.verifyPayment = async (req, res) => {
     order.orderStatus = 'received';
     await order.save();
 
+    // The order is only NOW genuinely placed, so this is the correct moment
+    // to make it the customer's current order. Doing it server-side means it
+    // is right even if the customer's phone died before it could tell us.
+    await setCustomerCurrentOrder(order);
+
     res.json({
       success: true,
       message: 'Payment verified successfully',
@@ -430,5 +436,29 @@ exports.downloadBill = async (req, res) => {
     res.status(500).json({ success: false, message: 'Error generating bill' });
   }
 };
+
+/**
+ * Point the customer's profile at this order once it is genuinely placed.
+ * Customers are identified by phone + restaurant (there is no login), which
+ * is the same pairing used everywhere else in the app.
+ */
+async function setCustomerCurrentOrder(order) {
+  try {
+    if (!order.customerPhone) return;
+    const customer = await Customer.findOne({
+      phone: order.customerPhone,
+      restaurantId: order.restaurantId
+    });
+    if (!customer) return;
+    customer.currentOrderId = order._id;
+    customer.lastVisit = new Date();
+    await customer.save();
+  } catch (e) {
+    // Never let this break payment verification
+    console.error('setCustomerCurrentOrder error:', e);
+  }
+}
+
+exports.setCustomerCurrentOrder = setCustomerCurrentOrder;
 
 module.exports = exports;

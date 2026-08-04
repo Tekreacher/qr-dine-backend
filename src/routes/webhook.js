@@ -3,6 +3,7 @@ const router = express.Router();
 const crypto = require('crypto');
 const Order = require('../models/Order');
 const Restaurant = require('../models/Restaurant');
+const { setCustomerCurrentOrder } = require('../controllers/orderController');
 
 // @route   POST /api/webhook/razorpay/:restaurantId
 // @desc    Handle Razorpay webhooks (payment.captured / payment.failed)
@@ -91,6 +92,11 @@ async function handlePaymentCaptured(payment, restaurantId) {
     order.razorpayPaymentId = payment.id;
     order.orderStatus = 'received';
     await order.save();
+
+    // Same rule as the browser path: an order becomes the customer's
+    // "current order" only once payment is confirmed.
+    await setCustomerCurrentOrder(order);
+
     console.log('✅ Webhook confirmed payment for order', order._id.toString());
   }
 }
