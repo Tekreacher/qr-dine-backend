@@ -7,7 +7,16 @@ const Restaurant = require('../models/Restaurant');
 const { sendVaultOtpEmail } = require('../services/emailService');
 
 const multer = require('multer');
-const cloudinary = require('../config/cloudinary');
+
+// Same approach menu.js already uses for menu-item images: pull in the SDK
+// directly and configure it from env vars here. This avoids depending on the
+// location of any shared config file.
+const cloudinary = require('cloudinary').v2;
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET
+});
 
 // Same pattern already used for menu-item images: hold the file in memory,
 // then stream it to Cloudinary.
