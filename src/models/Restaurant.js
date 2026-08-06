@@ -48,6 +48,10 @@ const restaurantSchema = new mongoose.Schema({
   },
   categories: [categorySchema],
   menuItems: [menuItemSchema],
+  // Restaurant logo / banner shown to customers next to the name.
+  // Empty means the app falls back to the default store icon.
+  logo: { type: String, default: '' },
+
   qrCode: String,
   uniqueCode: {
     type: String,

@@ -6,6 +6,20 @@ const { protect } = require('../middleware/auth');
 const Restaurant = require('../models/Restaurant');
 const { sendVaultOtpEmail } = require('../services/emailService');
 
+const multer = require('multer');
+const cloudinary = require('../config/cloudinary');
+
+// Same pattern already used for menu-item images: hold the file in memory,
+// then stream it to Cloudinary.
+const logoUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype.startsWith('image/')) cb(null, true);
+    else cb(new Error('Only image files are allowed'), false);
+  }
+});
+
 // ── Helper: mask a Razorpay Key ID for display, e.g. rzp_test_SDGs****Igvgd ──
 function maskKeyId(key) {
   if (!key) return null;
@@ -76,11 +90,118 @@ router.put('/profile', protect, async (req, res) => {
   }
 });
 
+// @route   PUT /api/restaurant/details
+// @desc    Update restaurant display details (name, phone, address) from the
+//          Restaurant Details tab. Validates the name, since it is the most
+//          visible thing a customer sees after scanning the QR code.
+// @access  Private
+router.put('/details', protect, async (req, res) => {
+  try {
+    const { name, phone, address } = req.body;
+
+    if (name !== undefined) {
+      const trimmed = String(name).trim();
+      if (trimmed.length < 2) {
+        return res.status(400).json({
+          success: false,
+          message: 'Restaurant name must be at least 2 characters'
+        });
+      }
+      if (trimmed.length > 60) {
+        return res.status(400).json({
+          success: false,
+          message: 'Restaurant name must be 60 characters or less'
+        });
+      }
+    }
+
+    const restaurant = await Restaurant.findById(req.restaurant._id);
+    if (!restaurant) {
+      return res.status(404).json({ success: false, message: 'Restaurant not found' });
+    }
+
+    if (name !== undefined) restaurant.name = String(name).trim();
+    if (phone !== undefined) restaurant.phone = String(phone).trim();
+    if (address !== undefined) {
+      restaurant.address = {
+        street: address.street ?? restaurant.address?.street ?? '',
+        city: address.city ?? restaurant.address?.city ?? '',
+        state: address.state ?? restaurant.address?.state ?? '',
+        pincode: address.pincode ?? restaurant.address?.pincode ?? ''
+      };
+    }
+
+    await restaurant.save();
+
+    res.json({
+      success: true,
+      message: 'Restaurant details updated',
+      restaurant: {
+        name: restaurant.name,
+        phone: restaurant.phone,
+        address: restaurant.address,
+        logo: restaurant.logo
+      }
+    });
+  } catch (error) {
+    console.error('Error updating restaurant details:', error);
+    res.status(500).json({ success: false, message: 'Error updating restaurant details' });
+  }
+});
+
+// @route   POST /api/restaurant/logo
+// @desc    Upload / replace the restaurant logo or banner shown to customers
+// @access  Private
+router.post('/logo', protect, logoUpload.single('logo'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ success: false, message: 'No image uploaded' });
+    }
+
+    const result = await new Promise((resolve, reject) => {
+      const uploadStream = cloudinary.uploader.upload_stream(
+        {
+          folder: 'qr-dine/restaurant-logos',
+          // Cap the size so a huge photo doesn't slow the customer menu page.
+          transformation: [{ width: 600, height: 600, crop: 'limit' }]
+        },
+        (error, uploaded) => (error ? reject(error) : resolve(uploaded))
+      );
+      uploadStream.end(req.file.buffer);
+    });
+
+    const restaurant = await Restaurant.findById(req.restaurant._id);
+    restaurant.logo = result.secure_url;
+    await restaurant.save();
+
+    res.json({
+      success: true,
+      message: 'Logo updated',
+      logo: restaurant.logo
+    });
+  } catch (error) {
+    console.error('Logo upload error:', error);
+    res.status(500).json({ success: false, message: 'Error uploading logo' });
+  }
+});
+
+// @route   DELETE /api/restaurant/logo
+// @desc    Remove the logo (customers fall back to the default store icon)
+// @access  Private
+router.delete('/logo', protect, async (req, res) => {
+  try {
+    const restaurant = await Restaurant.findById(req.restaurant._id);
+    restaurant.logo = '';
+    await restaurant.save();
+    res.json({ success: true, message: 'Logo removed' });
+  } catch (error) {
+    res.status(500).json({ success: false, message: 'Error removing logo' });
+  }
+});
+
 // @route   GET /api/restaurant/razorpay-status
 // @desc    Get Razorpay configuration status (masked, never exposes secret)
 // @access  Private
-
-
 router.get('/razorpay-status', protect, async (req, res) => {
   try {
     const restaurant = await Restaurant.findById(req.restaurant._id)
@@ -100,8 +221,6 @@ router.get('/razorpay-status', protect, async (req, res) => {
     res.status(500).json({ success: false, message: 'Error fetching Razorpay status' });
   }
 });
-
-
 
 // @route   PUT /api/restaurant/razorpay
 // @desc    Save/update Razorpay credentials (owner is already authenticated via dashboard login)
@@ -136,26 +255,11 @@ router.put('/razorpay', protect, async (req, res) => {
   }
 });
 
-// ============================================================================
-// PATCH FOR: backend/src/routes/restaurant.js
-//
-// This is a NEW route — add it anywhere after the existing `/razorpay` PUT
-// route (around line 130, right after that route's closing `});`).
-// It lets a logged-in restaurant save the webhook secret they generate in
-// their own Razorpay Dashboard → Settings → Webhooks, so your new
-// routes/webhook.js can verify signatures per-restaurant.
-//
-// Also requires the Restaurant.js model update (already provided separately)
-// which adds the `razorpayWebhookSecret` field.
-// ============================================================================
-
 // @route   PUT /api/restaurant/razorpay-webhook-secret
 // @desc    Save the webhook secret this restaurant generated in their own
 //          Razorpay Dashboard (Settings → Webhooks → Add New Webhook).
-//          Tell restaurants to point the webhook URL at:
+//          Webhook URL format:
 //            https://<your-api-domain>/api/webhook/razorpay/<their restaurantId>
-//          (their restaurantId is visible on their dashboard / can be
-//          returned from GET /api/restaurant/profile as `_id`)
 //          Active events to select: payment.captured, payment.failed
 // @access  Private
 router.put('/razorpay-webhook-secret', protect, async (req, res) => {
@@ -185,7 +289,6 @@ router.put('/razorpay-webhook-secret', protect, async (req, res) => {
     });
   }
 });
-
 
 // @route   POST /api/restaurant/razorpay-vault/set-password
 // @desc    Set a password to secure/hide Razorpay credentials for the first time
@@ -351,6 +454,9 @@ router.post('/razorpay-vault/reset-password', protect, async (req, res) => {
 // @route   GET /api/restaurant/:uniqueCode
 // @desc    Get restaurant by unique code (public)
 // @access  Public
+//
+// NOTE: this must stay LAST — it is a catch-all and would otherwise swallow
+// requests meant for /profile, /details, /logo, /razorpay-status, etc.
 router.get('/:uniqueCode', async (req, res) => {
   try {
     // Search current uniqueCode OR any code in allQrCodes array
@@ -390,9 +496,12 @@ router.get('/:uniqueCode', async (req, res) => {
         _id: restaurant._id,
         id: restaurant._id.toString(),
         name: restaurant.name,
+        // Customer menu header shows this photo; empty string means the app
+        // falls back to the default store icon.
+        logo: restaurant.logo || '',
         address: restaurant.address,
-        menuItems: restaurant.menuItems.filter(item => item.available),
-        razorpayKeyId: restaurant.razorpayKeyId
+        phone: restaurant.phone,
+        menuItems: restaurant.menuItems.filter(item => item.available)
       }
     });
   } catch (error) {
