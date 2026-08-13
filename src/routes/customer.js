@@ -231,6 +231,57 @@ router.post('/:customerId/complete-order', async (req, res) => {
   }
 });
 
+// @route   GET /api/customer/:customerId/active-orders
+// @desc    All orders for this customer at this restaurant that are still
+//          "live" — placed (paid, or accepted by staff for a cash order) and
+//          not yet completed or cancelled. This is what the Order Status
+//          page paginates through, so a customer never loses track of an
+//          earlier order just because they placed another one.
+// @access  Public
+router.get('/:customerId/active-orders', async (req, res) => {
+  try {
+    const customer = await Customer.findOne({ customerId: req.params.customerId });
+    if (!customer) {
+      return res.status(404).json({ success: false, message: 'Customer not found' });
+    }
+
+    const orders = await Order.find({
+      restaurantId: customer.restaurantId,
+      customerPhone: customer.phone,
+      orderStatus: { $nin: ['completed', 'cancelled'] }
+    })
+      .populate('restaurantId', 'name phone address')
+      .sort({ createdAt: -1 });
+
+    // "Placed" mirrors the exact rule the restaurant dashboard already uses:
+    // paid online, OR staff has moved it past pending (accepted a cash order).
+    // An order still sitting unpaid and untouched never shows to the customer
+    // as something to track — it's an abandoned checkout, not a real order.
+    const placed = orders.filter(
+      o => o.paymentStatus === 'paid' || o.orderStatus !== 'pending'
+    );
+
+    res.json({
+      success: true,
+      orders: placed.map(o => ({
+        id: o._id,
+        restaurant: o.restaurantId,
+        items: o.items,
+        totalAmount: o.totalAmount,
+        orderStatus: o.orderStatus,
+        paymentStatus: o.paymentStatus,
+        isReady: o.isReady,
+        readyAt: o.readyAt,
+        createdAt: o.createdAt,
+        tableNumber: o.tableNumber
+      }))
+    });
+  } catch (error) {
+    console.error('Error fetching active orders:', error);
+    res.status(500).json({ success: false, message: 'Error fetching active orders' });
+  }
+});
+
 // @route   GET /api/customer/:customerId/order-history
 // @desc    Get customer order history with full order details
 // @access  Public
