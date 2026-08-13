@@ -245,10 +245,19 @@ router.get('/:customerId/active-orders', async (req, res) => {
       return res.status(404).json({ success: false, message: 'Customer not found' });
     }
 
+    // A genuine dine-in order finishes within a few hours at the very
+    // outside. Without a time boundary, this query would pull in every order
+    // that was ever paid but never explicitly marked "Completed" on the
+    // dashboard — including from days or weeks ago — and a customer would
+    // see that entire backlog as "still active" forever. 12 hours is a
+    // generous window for a real meal; anything older is stale, not live.
+    const RECENT_CUTOFF = new Date(Date.now() - 12 * 60 * 60 * 1000);
+
     const orders = await Order.find({
       restaurantId: customer.restaurantId,
       customerPhone: customer.phone,
-      orderStatus: { $nin: ['completed', 'cancelled'] }
+      orderStatus: { $nin: ['completed', 'cancelled'] },
+      createdAt: { $gte: RECENT_CUTOFF }
     })
       .populate('restaurantId', 'name phone address')
       .sort({ createdAt: -1 });
