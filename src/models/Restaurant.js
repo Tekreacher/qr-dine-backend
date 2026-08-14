@@ -79,6 +79,12 @@ const restaurantSchema = new mongoose.Schema({
   razorpayOtpHash: { type: String, select: false },
   razorpayOtpExpiry: { type: Date, select: false },
 
+  // Separate from the Razorpay vault OTP above — this pair is for resetting
+  // the restaurant's own LOGIN password (the one used on this page every
+  // day), a completely different credential from the payment vault.
+  passwordResetOtpHash: { type: String, select: false },
+  passwordResetOtpExpiry: { type: Date, select: false },
+
   // Admin approval & subscription
   isApproved: { type: Boolean, default: false },
   isActive: { type: Boolean, default: false },

@@ -17,16 +17,20 @@ const nodemailer = require('nodemailer');
 
 const BREVO_API_URL = 'https://api.brevo.com/v3/smtp/email';
 
-function buildOtpHtml(otp, restaurantName) {
+// `purpose` distinguishes what's being reset in the email body/subject —
+// the vault password (payment credentials) and the login password (this
+// restaurant's own daily sign-in) are two completely separate credentials,
+// and the email must say clearly which one so an owner never mixes them up.
+function buildOtpHtml(otp, restaurantName, purposeLabel, reassurance) {
   return `
     <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto; padding: 24px;">
       <h2 style="color: #3B82F6;">QR Dine</h2>
       <p>Hi ${restaurantName || 'there'},</p>
-      <p>You requested to reset your <strong>Razorpay Vault Password</strong>. Use the OTP below to proceed:</p>
+      <p>You requested to reset your <strong>${purposeLabel}</strong>. Use the OTP below to proceed:</p>
       <div style="background: #F0F7FF; border: 1px solid #3B82F6; border-radius: 8px; padding: 20px; text-align: center; margin: 20px 0;">
         <span style="font-size: 32px; font-weight: bold; letter-spacing: 8px; color: #1e293b;">${otp}</span>
       </div>
-      <p style="color: #666;">This OTP is valid for <strong>10 minutes</strong>. If you did not request this, please ignore this email — your Razorpay credentials remain secure.</p>
+      <p style="color: #666;">This OTP is valid for <strong>10 minutes</strong>. If you did not request this, please ignore this email — ${reassurance}</p>
       <p style="color: #999; font-size: 12px; margin-top: 24px;">— QR Dine Security Team</p>
     </div>
   `;
@@ -95,19 +99,46 @@ async function sendViaSmtp(toEmail, subject, htmlContent) {
  */
 async function sendVaultOtpEmail(toEmail, otp, restaurantName) {
   const subject = 'QR Dine — Razorpay Vault Password Reset OTP';
-  const htmlContent = buildOtpHtml(otp, restaurantName);
+  const htmlContent = buildOtpHtml(
+    otp, restaurantName,
+    'Razorpay Vault Password',
+    'your Razorpay credentials remain secure.'
+  );
 
   if (process.env.BREVO_API_KEY) {
     await sendViaBrevo(toEmail, subject, htmlContent);
-    //console.log(`[email] OTP sent to ${toEmail} via Brevo HTTPS API`);
-    console.log('[email] OTP sent via Brevo HTTPS API');
+    console.log('[email] Vault reset OTP sent via Brevo HTTPS API');
     return;
   }
 
   console.warn('[email] BREVO_API_KEY not set — falling back to SMTP (will fail on Render)');
   await sendViaSmtp(toEmail, subject, htmlContent);
-  //console.log(`[email] OTP sent to ${toEmail} via SMTP`);
-  console.log('[email] OTP sent via SMTP');
+  console.log('[email] Vault reset OTP sent via SMTP');
 }
 
-module.exports = { sendVaultOtpEmail };
+/**
+ * Send a 6-digit OTP to the restaurant owner's registered email, used to
+ * reset their LOGIN password — the one used on the daily sign-in page.
+ * Deliberately separate from sendVaultOtpEmail above: different subject,
+ * different wording, same underlying delivery mechanism.
+ */
+async function sendLoginPasswordResetOtpEmail(toEmail, otp, restaurantName) {
+  const subject = 'QR Dine — Login Password Reset OTP';
+  const htmlContent = buildOtpHtml(
+    otp, restaurantName,
+    'QR Dine Login Password',
+    'your account remains secure and no changes have been made.'
+  );
+
+  if (process.env.BREVO_API_KEY) {
+    await sendViaBrevo(toEmail, subject, htmlContent);
+    console.log('[email] Login reset OTP sent via Brevo HTTPS API');
+    return;
+  }
+
+  console.warn('[email] BREVO_API_KEY not set — falling back to SMTP (will fail on Render)');
+  await sendViaSmtp(toEmail, subject, htmlContent);
+  console.log('[email] Login reset OTP sent via SMTP');
+}
+
+module.exports = { sendVaultOtpEmail, sendLoginPasswordResetOtpEmail };

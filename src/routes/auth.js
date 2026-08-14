@@ -1,8 +1,17 @@
 const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
+const bcrypt = require('bcryptjs');
+const crypto = require('crypto');
 const { body, validationResult } = require('express-validator');
 const Restaurant = require('../models/Restaurant');
+const { sendLoginPasswordResetOtpEmail } = require('../services/emailService');
+
+// Same strength rule already used for the Razorpay vault password —
+// keeping both password policies consistent.
+function isStrongPassword(pw) {
+  return /^(?=.*[A-Za-z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,}$/.test(pw || '');
+}
 
 const generateToken = (id) => {
   return jwt.sign({ id }, process.env.JWT_SECRET, {
@@ -160,6 +169,95 @@ router.get('/me', async (req, res) => {
     res.json({ success: true, restaurant });
   } catch (error) {
     res.status(401).json({ success: false, message: 'Invalid token' });
+  }
+});
+
+// @route   POST /api/auth/forgot-password
+// @desc    Send a 6-digit OTP to the restaurant's registered email to reset
+//          their LOGIN password (not the Razorpay vault password — that has
+//          its own separate reset flow under /api/restaurant/razorpay-vault).
+// @access  Public
+router.post('/forgot-password', async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) {
+      return res.status(400).json({ success: false, message: 'Email is required' });
+    }
+
+    const restaurant = await Restaurant.findOne({ email });
+
+    // Deliberately vague on a miss — never confirm/deny whether an email is
+    // registered. Prevents using this endpoint to discover restaurant emails.
+    if (!restaurant) {
+      return res.json({
+        success: true,
+        message: 'If that email is registered, an OTP has been sent.'
+      });
+    }
+
+    const otp = crypto.randomInt(100000, 999999).toString();
+    restaurant.passwordResetOtpHash = await bcrypt.hash(otp, 10);
+    restaurant.passwordResetOtpExpiry = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+    await restaurant.save();
+
+    await sendLoginPasswordResetOtpEmail(restaurant.email, otp, restaurant.name);
+
+    res.json({
+      success: true,
+      message: 'If that email is registered, an OTP has been sent.'
+    });
+  } catch (error) {
+    console.error('Forgot-password error:', error);
+    // Still don't leak whether the email exists, even on a server error.
+    res.json({
+      success: true,
+      message: 'If that email is registered, an OTP has been sent.'
+    });
+  }
+});
+
+// @route   POST /api/auth/reset-password
+// @desc    Verify the OTP from forgot-password and set a new login password
+// @access  Public
+router.post('/reset-password', async (req, res) => {
+  try {
+    const { email, otp, newPassword } = req.body;
+
+    if (!isStrongPassword(newPassword)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Password must be at least 8 characters and include a letter, a number, and a special character.'
+      });
+    }
+
+    const restaurant = await Restaurant.findOne({ email })
+      .select('+passwordResetOtpHash +passwordResetOtpExpiry');
+
+    if (!restaurant || !restaurant.passwordResetOtpHash || !restaurant.passwordResetOtpExpiry) {
+      return res.status(400).json({ success: false, message: 'No reset request found. Please request a new OTP.' });
+    }
+
+    if (restaurant.passwordResetOtpExpiry < new Date()) {
+      return res.status(400).json({ success: false, message: 'OTP has expired. Please request a new one.' });
+    }
+
+    const isMatch = await bcrypt.compare(otp || '', restaurant.passwordResetOtpHash);
+    if (!isMatch) {
+      return res.status(401).json({ success: false, message: 'Invalid OTP' });
+    }
+
+    // Setting restaurant.password directly and calling save() re-triggers the
+    // model's own pre-save hashing hook — same pattern used everywhere else
+    // a password is changed in this codebase.
+    restaurant.password = newPassword;
+    restaurant.passwordResetOtpHash = undefined;
+    restaurant.passwordResetOtpExpiry = undefined;
+    await restaurant.save();
+
+    res.json({ success: true, message: 'Password reset successfully. You can now log in with your new password.' });
+  } catch (error) {
+    console.error('Reset-password error:', error);
+    res.status(500).json({ success: false, message: 'Error resetting password' });
   }
 });
 
