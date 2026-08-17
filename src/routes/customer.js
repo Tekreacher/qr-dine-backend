@@ -365,4 +365,50 @@ router.get('/:customerId/order-history', async (req, res) => {
   }
 });
 
+// @route   DELETE /api/customer/:customerId
+// @desc    Customer-initiated data deletion ("right to erasure"). Deletes
+//          the Customer profile itself. Their past Orders are NOT deleted —
+//          the restaurant has a legitimate business/accounting need to keep
+//          order records (revenue, tax, dispute history) — instead the
+//          personal identifiers on those orders (name, phone) are wiped so
+//          the records can no longer be tied back to this person, while the
+//          order/amount/item data the restaurant is entitled to keep stays
+//          intact. This mirrors the "erase personal data, retain financial
+//          records" approach most privacy laws (GDPR Art. 17(3), etc.)
+//          explicitly allow for.
+// @access  Public — customerId itself functions as the bearer credential for
+//          this profile everywhere else in this file (see /:customerId/profile
+//          etc. above), so this route stays consistent with that pattern
+//          rather than introducing a new auth mechanism just for this route.
+router.delete('/:customerId', async (req, res) => {
+  try {
+    const customer = await Customer.findOne({ customerId: req.params.customerId });
+
+    if (!customer) {
+      // Already gone (or never existed) — deletion is idempotent either way.
+      return res.json({ success: true, message: 'No data found for this profile.' });
+    }
+
+    const { restaurantId, phone } = customer;
+
+    // Strip personal identifiers from this customer's past orders at this
+    // restaurant, but leave the order records themselves (amount, items,
+    // timestamps, status) intact for the restaurant's own accounting.
+    await Order.updateMany(
+      { restaurantId, customerPhone: phone },
+      { $set: { customerName: 'Deleted Customer', customerPhone: null } }
+    );
+
+    await Customer.deleteOne({ _id: customer._id });
+
+    res.json({
+      success: true,
+      message: 'Your profile and personal details have been deleted from this restaurant.'
+    });
+  } catch (error) {
+    console.error('Error deleting customer data:', error);
+    res.status(500).json({ success: false, message: 'Error deleting your data. Please try again.' });
+  }
+});
+
 module.exports = router;

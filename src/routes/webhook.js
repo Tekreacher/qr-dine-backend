@@ -83,16 +83,19 @@ router.post(
 );
 
 async function handlePaymentCaptured(payment, restaurantId) {
-  const order = await Order.findOne({
-    razorpayOrderId: payment.order_id,
-    restaurantId
-  });
-  if (order && order.paymentStatus !== 'paid') {
-    order.paymentStatus = 'paid';
-    order.razorpayPaymentId = payment.id;
-    order.orderStatus = 'received';
-    await order.save();
+  // Atomic find-AND-update, guarded by paymentStatus still being un-paid, so
+  // this webhook firing at the same moment as the browser's own
+  // /verify-payment call (Razorpay sometimes delivers webhooks within
+  // milliseconds of the checkout success callback) can't both "win" and
+  // double-process the same order — whichever request gets there first
+  // flips the status; the other's filter simply no longer matches.
+  const order = await Order.findOneAndUpdate(
+    { razorpayOrderId: payment.order_id, restaurantId, paymentStatus: { $ne: 'paid' } },
+    { $set: { paymentStatus: 'paid', razorpayPaymentId: payment.id, orderStatus: 'received' } },
+    { new: true }
+  );
 
+  if (order) {
     // Same rule as the browser path: an order becomes the customer's
     // "current order" only once payment is confirmed.
     await setCustomerCurrentOrder(order);

@@ -4,6 +4,8 @@ const cors = require('cors');
 const path = require('path');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
+const mongoSanitize = require('express-mongo-sanitize');
+const Sentry = require('@sentry/node');
 
 const app = express();
 
@@ -116,6 +118,12 @@ app.use('/api/webhook', require('./routes/webhook'));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+// Strip any Mongo operators ($gt, $ne, etc.) out of user-supplied input so
+// request bodies/params/query strings can never be used to inject query
+// operators — was already a package.json dependency but was never actually
+// wired in as middleware, so it wasn't doing anything until now.
+app.use(mongoSanitize());
+
 // Static uploads
 app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
 
@@ -145,6 +153,16 @@ app.use('/api/admin', authLimiter, require('./routes/admin'));
 app.get('/health', (req, res) => {
   res.json({ status: 'OK', timestamp: new Date().toISOString() });
 });
+
+/* ===============================
+   SENTRY ERROR CAPTURE
+   Must be registered AFTER all routes and BEFORE the error handler below —
+   this is what forwards any error that reaches our error handler to Sentry.
+   No-ops harmlessly if SENTRY_DSN isn't set (see server.js).
+================================ */
+if (process.env.SENTRY_DSN) {
+  Sentry.setupExpressErrorHandler(app);
+}
 
 /* ===============================
    ERROR HANDLER

@@ -26,4 +26,8 @@ const customerSchema = new mongoose.Schema({
   isExistingCustomer: { type: Boolean, default: false }
 }, { timestamps: true });
 
+// The hot lookup path in routes/customer.js is Customer.findOne({ phone, restaurantId })
+// on every diner who enters their phone number — this compound index serves it directly.
+customerSchema.index({ restaurantId: 1, phone: 1 });
+
 module.exports = mongoose.model('Customer', customerSchema);

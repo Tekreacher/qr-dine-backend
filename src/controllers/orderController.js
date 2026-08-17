@@ -259,21 +259,46 @@ exports.verifyPayment = async (req, res) => {
 
     console.log('✅ Payment signature verified');
 
-    order.razorpayPaymentId = razorpayPaymentId;
-    order.razorpaySignature = razorpaySignature;
-    order.paymentStatus = 'paid';
-    order.orderStatus = 'received';
-    await order.save();
+    // Atomic find-AND-update guarded by paymentStatus still being un-paid —
+    // the Razorpay webhook (webhook.js) can fire for the same order within
+    // milliseconds of this request, so a plain read-then-save here could
+    // race with it. Whichever request's update actually matches wins;
+    // the loser's filter simply won't match anymore.
+    const updatedOrder = await Order.findOneAndUpdate(
+      { _id: order._id, paymentStatus: { $ne: 'paid' } },
+      {
+        $set: {
+          razorpayPaymentId,
+          razorpaySignature,
+          paymentStatus: 'paid',
+          orderStatus: 'received'
+        }
+      },
+      { new: true }
+    );
 
-    // The order is only NOW genuinely placed, so this is the correct moment
-    // to make it the customer's current order. Doing it server-side means it
-    // is right even if the customer's phone died before it could tell us.
-    await setCustomerCurrentOrder(order);
+    if (updatedOrder) {
+      // The order is only NOW genuinely placed, so this is the correct moment
+      // to make it the customer's current order. Doing it server-side means it
+      // is right even if the customer's phone died before it could tell us.
+      await setCustomerCurrentOrder(updatedOrder);
 
-    res.json({
+      return res.json({
+        success: true,
+        message: 'Payment verified successfully',
+        order: updatedOrder
+      });
+    }
+
+    // Someone else (the webhook, almost certainly) already marked it paid in
+    // the tiny window between our read above and this update — that's not an
+    // error, just a race we lost. Return the current state as a success,
+    // same as the "already verified" early-return above.
+    const freshOrder = await Order.findById(order._id);
+    return res.json({
       success: true,
-      message: 'Payment verified successfully',
-      order
+      message: 'Payment already verified',
+      order: freshOrder
     });
   } catch (error) {
     console.error('❌ Payment verification error:', error);

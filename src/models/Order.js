@@ -50,5 +50,12 @@ const orderSchema = new mongoose.Schema({
   timestamps: true
 });
 
+// Indexes for the query patterns actually used in this codebase:
+// - restaurant dashboard "my orders" list + analytics date filtering
+orderSchema.index({ restaurantId: 1, createdAt: -1 });
+// - Razorpay webhook looks an order up by its Razorpay order id, scoped
+//   to the restaurant (webhook.js handlePaymentCaptured/handlePaymentFailed)
+orderSchema.index({ razorpayOrderId: 1, restaurantId: 1 });
+
 module.exports = mongoose.model('Order', orderSchema);
 

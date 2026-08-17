@@ -10,6 +10,23 @@ if (typeof dns.setDefaultResultOrder === 'function') {
 
 require('dotenv').config(); // MUST be first
 
+// Error monitoring — no-ops harmlessly if SENTRY_DSN isn't set, so this is
+// safe to deploy even before you've created a Sentry project. Once you add
+// SENTRY_DSN to Render's environment variables, every uncaught error/crash
+// (and every 500 the Express error handler in app.js sees) gets reported
+// here instead of only ever showing up in Render's logs.
+const Sentry = require('@sentry/node');
+if (process.env.SENTRY_DSN) {
+  Sentry.init({
+    dsn: process.env.SENTRY_DSN,
+    environment: process.env.NODE_ENV || 'development',
+    tracesSampleRate: 0.1
+  });
+  console.log('🩺 Sentry error monitoring enabled');
+} else {
+  console.log('🩺 Sentry disabled — no SENTRY_DSN set');
+}
+
 const app = require('./src/app');
 const connectDB = require('./src/config/db');
 
@@ -47,6 +64,7 @@ const server = app.listen(PORT, '0.0.0.0', () => {
 // Catch async promise crashes (DB, Razorpay, etc.)
 process.on('unhandledRejection', (err) => {
   console.error('❌ Unhandled Rejection:', err);
+  if (process.env.SENTRY_DSN) Sentry.captureException(err);
   server.close(() => process.exit(1));
 });
 
